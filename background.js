@@ -1751,14 +1751,14 @@ async function submitVerificationCode(step, code) {
   return result || {};
 }
 
-async function resolveVerificationStep(step, state, mail) {
+async function resolveVerificationStep(step, state, mail, options = {}) {
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
   if (state[stateKey]) {
     rejectedCodes.add(state[stateKey]);
   }
 
-  let nextFilterAfterTimestamp = null;
+  let nextFilterAfterTimestamp = options.filterAfterTimestamp ?? null;
   const maxSubmitAttempts = 3;
 
   for (let attempt = 1; attempt <= maxSubmitAttempts; attempt++) {
@@ -1799,6 +1799,7 @@ async function resolveVerificationStep(step, state, mail) {
 async function executeStep4(state) {
   const mail = getMailConfig(state);
   if (mail.error) throw new Error(mail.error);
+  const stepStartedAt = Date.now();
   const signupTabId = await getTabId('signup-page');
   if (!signupTabId) {
     throw new Error('认证页面标签页已关闭，无法继续步骤 4。');
@@ -1850,7 +1851,7 @@ async function executeStep4(state) {
     });
   }
 
-  await resolveVerificationStep(4, state, mail);
+  await resolveVerificationStep(4, state, mail, { filterAfterTimestamp: stepStartedAt });
   return;
 }
 
@@ -1921,6 +1922,7 @@ async function executeStep6(state) {
 async function executeStep7(state) {
   const mail = getMailConfig(state);
   if (mail.error) throw new Error(mail.error);
+  const stepStartedAt = Date.now();
   const authTabId = await getTabId('signup-page');
 
   if (authTabId) {
@@ -1964,7 +1966,7 @@ async function executeStep7(state) {
     });
   }
 
-  await resolveVerificationStep(7, state, mail);
+  await resolveVerificationStep(7, state, mail, { filterAfterTimestamp: stepStartedAt });
   return;
 }
 

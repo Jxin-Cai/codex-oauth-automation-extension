@@ -82,15 +82,82 @@ function getCurrentMailIds() {
   return ids;
 }
 
+function normalizeMinuteTimestamp(timestamp) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 0;
+  const date = new Date(timestamp);
+  date.setSeconds(0, 0);
+  return date.getTime();
+}
+
+function parseMail163Timestamp(rawText) {
+  const text = (rawText || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  let match = text.match(/(\d{4})年(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})/);
+  if (match) {
+    const [, year, month, day, hour, minute] = match;
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      0,
+      0
+    ).getTime();
+  }
+
+  match = text.match(/\b(\d{1,2}):(\d{2})\b/);
+  if (match) {
+    const [, hour, minute] = match;
+    const now = new Date();
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      Number(hour),
+      Number(minute),
+      0,
+      0
+    ).getTime();
+  }
+
+  return null;
+}
+
+function getMailTimestamp(item) {
+  const candidates = [];
+  const timeCell = item.querySelector('.e00[title], [title*="年"][title*=":"]');
+  if (timeCell?.getAttribute('title')) candidates.push(timeCell.getAttribute('title'));
+  if (timeCell?.textContent) candidates.push(timeCell.textContent);
+
+  const titledNodes = item.querySelectorAll('[title]');
+  titledNodes.forEach((node) => {
+    const title = node.getAttribute('title');
+    if (title) candidates.push(title);
+  });
+
+  for (const candidate of candidates) {
+    const parsed = parseMail163Timestamp(candidate);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
 // ============================================================
 // Email Polling
 // ============================================================
 
 async function handlePollEmail(step, payload) {
-  const { senderFilters, subjectFilters, maxAttempts, intervalMs, excludeCodes = [] } = payload;
+  const { senderFilters, subjectFilters, maxAttempts, intervalMs, excludeCodes = [], filterAfterTimestamp = 0 } = payload;
   const excludedCodeSet = new Set(excludeCodes.filter(Boolean));
+  const filterAfterMinute = normalizeMinuteTimestamp(Number(filterAfterTimestamp) || 0);
 
   log(`步骤 ${step}：开始轮询 163 邮箱（最多 ${maxAttempts} 次）`);
+  if (filterAfterMinute) {
+    log(`步骤 ${step}：仅尝试 ${new Date(filterAfterMinute).toLocaleString('zh-CN', { hour12: false })} 及之后时间的邮件。`);
+  }
 
   // Click inbox in sidebar to ensure we're in inbox view
   log(`步骤 ${step}：正在等待侧边栏加载...`);
@@ -142,8 +209,16 @@ async function handlePollEmail(step, payload) {
 
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
+      const mailTimestamp = getMailTimestamp(item);
+      const mailMinute = normalizeMinuteTimestamp(mailTimestamp || 0);
+      const passesTimeFilter = !filterAfterMinute || (mailMinute && mailMinute >= filterAfterMinute);
+      const shouldBypassOldSnapshot = Boolean(filterAfterMinute && passesTimeFilter && mailMinute > 0);
 
-      if (!useFallback && existingMailIds.has(id)) continue;
+      if (!passesTimeFilter) {
+        continue;
+      }
+
+      if (!useFallback && !shouldBypassOldSnapshot && existingMailIds.has(id)) continue;
 
       const senderEl = item.querySelector('.nui-user');
       const sender = senderEl ? senderEl.textContent.toLowerCase() : '';
@@ -164,7 +239,8 @@ async function handlePollEmail(step, payload) {
           seenCodes.add(code);
           persistSeenCodes();
           const source = useFallback && existingMailIds.has(id) ? '回退匹配邮件' : '新邮件';
-          log(`步骤 ${step}：已找到验证码：${code}（来源：${source}，主题：${subject.slice(0, 40)}）`, 'ok');
+          const timeLabel = mailTimestamp ? `，时间：${new Date(mailTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
+          log(`步骤 ${step}：已找到验证码：${code}（来源：${source}${timeLabel}，主题：${subject.slice(0, 40)}）`, 'ok');
 
           // Delete this email via right-click menu, WAIT for it to finish before returning
           await deleteEmail(item, step);

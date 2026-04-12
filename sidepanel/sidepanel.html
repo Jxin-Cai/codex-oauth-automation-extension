@@ -97,6 +97,28 @@
         </label>
       </div>
       <div class="data-row">
+        <span class="data-label">延迟</span>
+        <div class="data-inline auto-delay-inline">
+          <label class="data-check auto-delay-check" for="input-auto-delay-enabled">
+            <input type="checkbox" id="input-auto-delay-enabled" />
+            <span>启动前倒计时</span>
+          </label>
+          <div class="auto-delay-controls">
+            <input
+              type="number"
+              id="input-auto-delay-minutes"
+              class="data-input auto-delay-input"
+              value="30"
+              min="1"
+              max="1440"
+              step="1"
+              title="启动前倒计时分钟数"
+            />
+            <span class="data-unit">分钟</span>
+          </div>
+        </div>
+      </div>
+      <div class="data-row">
         <span class="data-label">OAuth</span>
         <span id="display-oauth-url" class="data-value mono truncate">等待中...</span>
       </div>
@@ -113,6 +135,20 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <span class="auto-hint">先自动获取 Duck 邮箱，或手动粘贴邮箱后再继续</span>
       <button id="btn-auto-continue" class="btn btn-primary btn-sm">继续</button>
+    </div>
+    <div id="auto-schedule-bar" class="auto-schedule-bar" style="display:none;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <div class="auto-schedule-copy">
+        <span id="auto-schedule-title" class="auto-schedule-title">已计划自动运行</span>
+        <span id="auto-schedule-meta" class="auto-schedule-meta">等待倒计时开始...</span>
+      </div>
+      <div class="auto-schedule-actions">
+        <button id="btn-auto-run-now" class="btn btn-primary btn-sm" type="button">立即开始</button>
+        <button id="btn-auto-cancel-schedule" class="btn btn-outline btn-sm" type="button">取消</button>
+      </div>
     </div>
   </section>
 

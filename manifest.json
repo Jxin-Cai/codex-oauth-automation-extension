@@ -5,6 +5,7 @@
   "description": "用于自动执行多步骤 OAuth 注册流程",
   "permissions": [
     "sidePanel",
+    "alarms",
     "tabs",
     "webNavigation",
     "debugger",

@@ -376,6 +376,35 @@ header {
   flex-shrink: 0;
 }
 
+.auto-delay-inline {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auto-delay-check {
+  flex: 0 1 auto;
+}
+
+.auto-delay-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.auto-delay-input {
+  width: 72px;
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+.data-unit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
 /* Status Bar */
 .status-bar {
   display: flex;
@@ -422,6 +451,12 @@ header {
 }
 .status-bar.paused { color: var(--orange); }
 
+.status-bar.scheduled .status-dot {
+  background: var(--blue);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.status-bar.scheduled { color: var(--blue); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.85); }
@@ -440,6 +475,51 @@ header {
 }
 .auto-continue-bar svg { color: var(--orange); flex-shrink: 0; }
 .auto-hint { font-size: 13px; color: var(--orange); flex: 1; font-weight: 500; }
+
+.auto-schedule-bar {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--blue-soft);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.auto-schedule-bar svg {
+  color: var(--blue);
+  flex-shrink: 0;
+}
+
+.auto-schedule-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.auto-schedule-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--blue);
+}
+
+.auto-schedule-meta {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.auto-schedule-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
 
 /* ============================================================
    Steps Section

@@ -27,6 +27,11 @@ const stepsProgress = document.getElementById('steps-progress');
 const btnAutoRun = document.getElementById('btn-auto-run');
 const btnAutoContinue = document.getElementById('btn-auto-continue');
 const autoContinueBar = document.getElementById('auto-continue-bar');
+const autoScheduleBar = document.getElementById('auto-schedule-bar');
+const autoScheduleTitle = document.getElementById('auto-schedule-title');
+const autoScheduleMeta = document.getElementById('auto-schedule-meta');
+const btnAutoRunNow = document.getElementById('btn-auto-run-now');
+const btnAutoCancelSchedule = document.getElementById('btn-auto-cancel-schedule');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const inputVpsPassword = document.getElementById('input-vps-password');
@@ -37,6 +42,8 @@ const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
+const inputAutoDelayEnabled = document.getElementById('input-auto-delay-enabled');
+const inputAutoDelayMinutes = document.getElementById('input-auto-delay-minutes');
 const autoStartModal = document.getElementById('auto-start-modal');
 const autoStartTitle = autoStartModal?.querySelector('.modal-title');
 const autoStartMessage = document.getElementById('auto-start-message');
@@ -56,6 +63,9 @@ const STEP_DEFAULT_STATUSES = {
   9: 'pending',
 };
 const SKIPPABLE_STEPS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+const AUTO_DELAY_MIN_MINUTES = 1;
+const AUTO_DELAY_MAX_MINUTES = 1440;
+const AUTO_DELAY_DEFAULT_MINUTES = 30;
 
 let latestState = null;
 let currentAutoRun = {
@@ -64,12 +74,14 @@ let currentAutoRun = {
   currentRun: 0,
   totalRuns: 1,
   attemptRun: 0,
+  scheduledAt: null,
 };
 let settingsDirty = false;
 let settingsSaveInFlight = false;
 let settingsAutoSaveTimer = null;
 let modalChoiceResolver = null;
 let currentModalActions = [];
+let scheduledCountdownTimer = null;
 
 const EYE_OPEN_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_CLOSED_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19C5 19 1 12 1 12a21.77 21.77 0 0 1 5.06-6.94"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 5c7 0 11 7 11 7a21.86 21.86 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/></svg>';
@@ -240,7 +252,7 @@ function syncAutoRunState(source = {}) {
   const autoRunning = source.autoRunning !== undefined
     ? Boolean(source.autoRunning)
     : (source.autoRunPhase !== undefined || source.phase !== undefined
-      ? ['running', 'waiting_email', 'retrying'].includes(phase)
+      ? ['scheduled', 'running', 'waiting_email', 'retrying'].includes(phase)
       : currentAutoRun.autoRunning);
 
   currentAutoRun = {
@@ -249,6 +261,7 @@ function syncAutoRunState(source = {}) {
     currentRun: source.autoRunCurrentRun ?? source.currentRun ?? currentAutoRun.currentRun,
     totalRuns: source.autoRunTotalRuns ?? source.totalRuns ?? currentAutoRun.totalRuns,
     attemptRun: source.autoRunAttemptRun ?? source.attemptRun ?? currentAutoRun.attemptRun,
+    scheduledAt: source.scheduledAutoRunAt ?? source.scheduledAt ?? currentAutoRun.scheduledAt,
   };
 }
 
@@ -260,12 +273,92 @@ function isAutoRunPausedPhase() {
   return currentAutoRun.phase === 'waiting_email';
 }
 
+function isAutoRunScheduledPhase() {
+  return currentAutoRun.phase === 'scheduled';
+}
+
 function getAutoRunLabel(payload = currentAutoRun) {
+  if ((payload.phase ?? currentAutoRun.phase) === 'scheduled') {
+    return (payload.totalRuns || 1) > 1 ? ` (${payload.totalRuns}轮)` : '';
+  }
   const attemptLabel = payload.attemptRun ? ` · 尝试${payload.attemptRun}` : '';
   if ((payload.totalRuns || 1) > 1) {
     return ` (${payload.currentRun}/${payload.totalRuns}${attemptLabel})`;
   }
   return attemptLabel ? ` (${attemptLabel.slice(3)})` : '';
+}
+
+function normalizeAutoDelayMinutes(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return AUTO_DELAY_DEFAULT_MINUTES;
+  }
+  return Math.min(AUTO_DELAY_MAX_MINUTES, Math.max(AUTO_DELAY_MIN_MINUTES, Math.floor(numeric)));
+}
+
+function updateAutoDelayInputState() {
+  const scheduled = isAutoRunScheduledPhase();
+  inputAutoDelayEnabled.disabled = scheduled;
+  inputAutoDelayMinutes.disabled = scheduled || !inputAutoDelayEnabled.checked;
+}
+
+function formatCountdown(remainingMs) {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatScheduleTime(timestamp) {
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function stopScheduledCountdownTicker() {
+  clearInterval(scheduledCountdownTimer);
+  scheduledCountdownTimer = null;
+}
+
+function renderScheduledAutoRunInfo() {
+  if (!autoScheduleBar) {
+    return;
+  }
+
+  if (!isAutoRunScheduledPhase() || !Number.isFinite(currentAutoRun.scheduledAt)) {
+    autoScheduleBar.style.display = 'none';
+    return;
+  }
+
+  const remainingMs = currentAutoRun.scheduledAt - Date.now();
+  autoScheduleBar.style.display = 'flex';
+  autoScheduleTitle.textContent = '已计划自动运行';
+  autoScheduleMeta.textContent = remainingMs > 0
+    ? `计划于 ${formatScheduleTime(currentAutoRun.scheduledAt)} 开始，剩余 ${formatCountdown(remainingMs)}`
+    : '倒计时即将结束，正在准备启动...';
+}
+
+function syncScheduledCountdownTicker() {
+  renderScheduledAutoRunInfo();
+  if (!isAutoRunScheduledPhase() || !Number.isFinite(currentAutoRun.scheduledAt)) {
+    stopScheduledCountdownTicker();
+    return;
+  }
+
+  if (scheduledCountdownTimer) {
+    return;
+  }
+
+  scheduledCountdownTimer = setInterval(() => {
+    renderScheduledAutoRunInfo();
+    updateStatusDisplay(latestState);
+  }, 1000);
 }
 
 function setDefaultAutoRunButton() {
@@ -283,6 +376,8 @@ function collectSettingsPayload() {
     inbucketHost: inputInbucketHost.value.trim(),
     inbucketMailbox: inputInbucketMailbox.value.trim(),
     autoRunSkipFailures: inputAutoSkipFailures.checked,
+    autoRunDelayEnabled: inputAutoDelayEnabled.checked,
+    autoRunDelayMinutes: normalizeAutoDelayMinutes(inputAutoDelayMinutes.value),
   };
 }
 
@@ -350,13 +445,23 @@ function applyAutoRunStatus(payload = currentAutoRun) {
   const runLabel = getAutoRunLabel(currentAutoRun);
   const locked = isAutoRunLockedPhase();
   const paused = isAutoRunPausedPhase();
+  const scheduled = isAutoRunScheduledPhase();
 
   inputRunCount.disabled = currentAutoRun.autoRunning;
   btnAutoRun.disabled = currentAutoRun.autoRunning;
   btnFetchEmail.disabled = locked;
   inputEmail.disabled = locked;
+  inputAutoSkipFailures.disabled = scheduled;
+
+  if (currentAutoRun.totalRuns > 0) {
+    inputRunCount.value = String(currentAutoRun.totalRuns);
+  }
 
   switch (currentAutoRun.phase) {
+    case 'scheduled':
+      autoContinueBar.style.display = 'none';
+      btnAutoRun.innerHTML = `已计划${runLabel}`;
+      break;
     case 'waiting_email':
       autoContinueBar.style.display = 'flex';
       btnAutoRun.innerHTML = `已暂停${runLabel}`;
@@ -379,7 +484,9 @@ function applyAutoRunStatus(payload = currentAutoRun) {
       break;
   }
 
-  updateStopButtonState(paused || locked || Object.values(getStepStatuses()).some(status => status === 'running'));
+  updateAutoDelayInputState();
+  syncScheduledCountdownTicker();
+  updateStopButtonState(scheduled || paused || locked || Object.values(getStepStatuses()).some(status => status === 'running'));
 }
 
 function initializeManualStepActions() {
@@ -451,6 +558,11 @@ async function restoreState() {
       inputInbucketMailbox.value = state.inbucketMailbox;
     }
     inputAutoSkipFailures.checked = Boolean(state.autoRunSkipFailures);
+    inputAutoDelayEnabled.checked = Boolean(state.autoRunDelayEnabled);
+    inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(state.autoRunDelayMinutes));
+    if (state.autoRunTotalRuns) {
+      inputRunCount.value = String(state.autoRunTotalRuns);
+    }
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -466,6 +578,7 @@ async function restoreState() {
 
     applyAutoRunStatus(state);
     markSettingsDirty(false);
+    updateAutoDelayInputState();
     updateStatusDisplay(latestState);
     updateProgressCounter();
     updateMailProviderUI();
@@ -518,12 +631,13 @@ function updateButtonStates() {
   const statuses = getStepStatuses();
   const anyRunning = Object.values(statuses).some(s => s === 'running');
   const autoLocked = isAutoRunLockedPhase();
+  const autoScheduled = isAutoRunScheduledPhase();
 
   for (let step = 1; step <= 9; step++) {
     const btn = document.querySelector(`.step-btn[data-step="${step}"]`);
     if (!btn) continue;
 
-    if (anyRunning || autoLocked) {
+    if (anyRunning || autoLocked || autoScheduled) {
       btn.disabled = true;
     } else if (step === 1) {
       btn.disabled = false;
@@ -539,7 +653,7 @@ function updateButtonStates() {
     const currentStatus = statuses[step];
     const prevStatus = statuses[step - 1];
 
-    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || currentStatus === 'running' || isDoneStatus(currentStatus)) {
+    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || autoScheduled || currentStatus === 'running' || isDoneStatus(currentStatus)) {
       btn.style.display = 'none';
       btn.disabled = true;
       btn.title = '当前不可跳过';
@@ -558,7 +672,8 @@ function updateButtonStates() {
     btn.title = `跳过步骤 ${step}`;
   });
 
-  updateStopButtonState(anyRunning || isAutoRunPausedPhase() || autoLocked);
+  btnReset.disabled = anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked;
+  updateStopButtonState(anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked);
 }
 
 function updateStopButtonState(active) {
@@ -569,6 +684,17 @@ function updateStatusDisplay(state) {
   if (!state || !state.stepStatuses) return;
 
   statusBar.className = 'status-bar';
+
+  if (isAutoRunScheduledPhase()) {
+    const remainingMs = Number.isFinite(currentAutoRun.scheduledAt)
+      ? currentAutoRun.scheduledAt - Date.now()
+      : 0;
+    displayStatus.textContent = remainingMs > 0
+      ? `自动计划中，剩余 ${formatCountdown(remainingMs)}`
+      : '倒计时即将结束，正在准备启动...';
+    statusBar.classList.add('scheduled');
+    return;
+  }
 
   if (isAutoRunPausedPhase()) {
     displayStatus.textContent = `自动已暂停${getAutoRunLabel()}，等待邮箱后继续`;
@@ -818,7 +944,7 @@ btnSaveSettings.addEventListener('click', async () => {
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
   await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
-  showToast('正在停止当前流程...', 'warn', 2000);
+  showToast(isAutoRunScheduledPhase() ? '正在取消倒计时计划...' : '正在停止当前流程...', 'warn', 2000);
 });
 
 autoStartModal?.addEventListener('click', (event) => {
@@ -831,7 +957,7 @@ btnAutoStartClose?.addEventListener('click', () => resolveModalChoice(null));
 // Auto Run
 btnAutoRun.addEventListener('click', async () => {
   try {
-    const totalRuns = parseInt(inputRunCount.value) || 1;
+    const totalRuns = Math.min(50, Math.max(1, parseInt(inputRunCount.value, 10) || 1));
     let mode = 'restart';
 
     if (shouldOfferAutoModeChoice()) {
@@ -845,12 +971,18 @@ btnAutoRun.addEventListener('click', async () => {
 
     btnAutoRun.disabled = true;
     inputRunCount.disabled = true;
-    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
+    const delayEnabled = inputAutoDelayEnabled.checked;
+    const delayMinutes = normalizeAutoDelayMinutes(inputAutoDelayMinutes.value);
+    inputAutoDelayMinutes.value = String(delayMinutes);
+    btnAutoRun.innerHTML = delayEnabled
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 计划中...'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
     const response = await chrome.runtime.sendMessage({
-      type: 'AUTO_RUN',
+      type: delayEnabled ? 'SCHEDULE_AUTO_RUN' : 'AUTO_RUN',
       source: 'sidepanel',
       payload: {
         totalRuns,
+        delayMinutes,
         autoRunSkipFailures: inputAutoSkipFailures.checked,
         mode,
       },
@@ -875,6 +1007,29 @@ btnAutoContinue.addEventListener('click', async () => {
   await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: { email } });
 });
 
+btnAutoRunNow?.addEventListener('click', async () => {
+  try {
+    btnAutoRunNow.disabled = true;
+    await chrome.runtime.sendMessage({ type: 'START_SCHEDULED_AUTO_RUN_NOW', source: 'sidepanel', payload: {} });
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btnAutoRunNow.disabled = false;
+  }
+});
+
+btnAutoCancelSchedule?.addEventListener('click', async () => {
+  try {
+    btnAutoCancelSchedule.disabled = true;
+    await chrome.runtime.sendMessage({ type: 'CANCEL_SCHEDULED_AUTO_RUN', source: 'sidepanel', payload: {} });
+    showToast('已取消倒计时计划。', 'info', 1800);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btnAutoCancelSchedule.disabled = false;
+  }
+});
+
 // Reset
 btnReset.addEventListener('click', async () => {
   const confirmed = await openConfirmModal({
@@ -889,7 +1044,7 @@ btnReset.addEventListener('click', async () => {
 
   await chrome.runtime.sendMessage({ type: 'RESET', source: 'sidepanel' });
   syncLatestState({ stepStatuses: STEP_DEFAULT_STATUSES });
-  syncAutoRunState({ autoRunning: false, autoRunPhase: 'idle', autoRunCurrentRun: 0, autoRunTotalRuns: 1, autoRunAttemptRun: 0 });
+  syncAutoRunState({ autoRunning: false, autoRunPhase: 'idle', autoRunCurrentRun: 0, autoRunTotalRuns: 1, autoRunAttemptRun: 0, scheduledAutoRunAt: null });
   displayOauthUrl.textContent = '等待中...';
   displayOauthUrl.classList.remove('has-value');
   displayLocalhostUrl.textContent = '等待中...';
@@ -973,6 +1128,21 @@ inputAutoSkipFailures.addEventListener('change', () => {
   saveSettings({ silent: true }).catch(() => { });
 });
 
+inputAutoDelayEnabled.addEventListener('change', () => {
+  updateAutoDelayInputState();
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+inputAutoDelayMinutes.addEventListener('input', () => {
+  markSettingsDirty(true);
+  scheduleSettingsAutoSave();
+});
+inputAutoDelayMinutes.addEventListener('blur', () => {
+  inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(inputAutoDelayMinutes.value));
+  saveSettings({ silent: true }).catch(() => { });
+});
+
 // ============================================================
 // Listen for Background broadcasts
 // ============================================================
@@ -1019,6 +1189,7 @@ chrome.runtime.onMessage.addListener((message) => {
         password: null,
         stepStatuses: STEP_DEFAULT_STATUSES,
         logs: [],
+        scheduledAutoRunAt: null,
       });
       displayOauthUrl.textContent = '等待中...';
       displayOauthUrl.classList.remove('has-value');
@@ -1057,11 +1228,12 @@ chrome.runtime.onMessage.addListener((message) => {
 
     case 'AUTO_RUN_STATUS': {
       syncLatestState({
-        autoRunning: ['running', 'waiting_email', 'retrying'].includes(message.payload.phase),
+        autoRunning: ['scheduled', 'running', 'waiting_email', 'retrying'].includes(message.payload.phase),
         autoRunPhase: message.payload.phase,
         autoRunCurrentRun: message.payload.currentRun,
         autoRunTotalRuns: message.payload.totalRuns,
         autoRunAttemptRun: message.payload.attemptRun,
+        scheduledAutoRunAt: message.payload.scheduledAt ?? null,
       });
       applyAutoRunStatus(message.payload);
       updateStatusDisplay(latestState);

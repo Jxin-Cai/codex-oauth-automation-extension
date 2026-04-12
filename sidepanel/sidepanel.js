@@ -19,6 +19,7 @@ const statusBar = document.getElementById('status-bar');
 const inputEmail = document.getElementById('input-email');
 const inputPassword = document.getElementById('input-password');
 const btnToggleVpsUrl = document.getElementById('btn-toggle-vps-url');
+const btnToggleVpsPassword = document.getElementById('btn-toggle-vps-password');
 const btnFetchEmail = document.getElementById('btn-fetch-email');
 const btnTogglePassword = document.getElementById('btn-toggle-password');
 const btnSaveSettings = document.getElementById('btn-save-settings');
@@ -1463,6 +1464,13 @@ function syncVpsUrlToggleLabel() {
   });
 }
 
+function syncVpsPasswordToggleLabel() {
+  syncToggleButtonLabel(btnToggleVpsPassword, inputVpsPassword, {
+    show: '显示管理密钥',
+    hide: '隐藏管理密钥',
+  });
+}
+
 async function maybeTakeoverAutoRun(actionLabel) {
   if (!isAutoRunPausedPhase()) {
     return true;
@@ -1797,6 +1805,11 @@ btnTogglePassword.addEventListener('click', () => {
 btnToggleVpsUrl.addEventListener('click', () => {
   inputVpsUrl.type = inputVpsUrl.type === 'password' ? 'text' : 'password';
   syncVpsUrlToggleLabel();
+});
+
+btnToggleVpsPassword.addEventListener('click', () => {
+  inputVpsPassword.type = inputVpsPassword.type === 'password' ? 'text' : 'password';
+  syncVpsPasswordToggleLabel();
 });
 
 localCpaStep9ModeButtons.forEach((button) => {
@@ -2279,6 +2292,7 @@ setLocalCpaStep9Mode(DEFAULT_LOCAL_CPA_STEP9_MODE);
 restoreState().then(() => {
   syncPasswordToggleLabel();
   syncVpsUrlToggleLabel();
+  syncVpsPasswordToggleLabel();
   updatePanelModeUI();
   updateButtonStates();
   updateStatusDisplay(latestState);

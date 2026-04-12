@@ -2,7 +2,7 @@
 
 一个用于批量跑通 ChatGPT OAuth 注册/登录流程的 Chrome 扩展。
 
-当前版本基于侧边栏控制，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / QQ / 163 / Inbucket mailbox 协助获取验证码。
+当前版本基于侧边栏控制，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / QQ / 163 / Inbucket / Hotmail 协助获取验证码。
 
 ## 最新版本测试结果
 
@@ -42,6 +42,7 @@
 - 支持自定义密码；留空时自动生成强密码
 - 自动显示当前使用中的密码，便于后续保存
 - 自动获取注册验证码与登录验证码
+- 支持 `Hotmail`：直接使用 `邮箱 + 客户端 ID + 刷新令牌（refresh token）` 刷新微软令牌，并通过 Microsoft Graph 读取最新邮件
 - 支持 `QQ Mail`、`163 Mail`、`Inbucket mailbox`
 - 支持从 DuckDuckGo Email Protection 自动生成新的 `@duck.com` 地址
 - 支持基于 Cloudflare 自定义域名自动生成随机邮箱前缀
@@ -86,16 +87,36 @@ Step 1 和 Step 9 都依赖这个地址。
 
 ### `Mail`
 
-支持三种验证码来源：
+支持四种验证码来源：
 
+- `Hotmail`
 - `163 Mail`
 - `QQ Mail`
 - `Inbucket`
 
 说明：
 
+- `Hotmail` 通过侧边栏里的 Hotmail 账号池选择账号，并直接访问 Microsoft Graph 邮件接口
 - `QQ` 和 `163` 用于直接轮询网页邮箱
 - `Inbucket` 通过你在侧边栏里配置的 host 访问 `mailbox` 页面：`https://<your-inbucket-host>/m/<mailbox>/`
+
+### `Hotmail 账号池`
+
+仅当 `Mail = Hotmail` 时使用。
+
+每条账号支持保存：
+
+- `email`
+- `clientId`
+- `refreshToken`
+- 可选邮箱密码备注
+
+使用方式：
+
+- 先新增账号
+- 点击 `校验`
+- 校验通过后，可点击 `测试收信`
+- Auto 模式每轮会自动选用一个可用账号
 
 ### `Mailbox`
 
@@ -144,6 +165,8 @@ Step 3 使用的注册邮箱。
 - 若 `邮箱生成 = Cloudflare`，插件里只需要维护 `CF 域名`
 - `CF 域名` 支持保存多个，并通过下拉框切换当前要生成的域名
 - Cloudflare 侧的转发规则、Catch-all、路由目标邮箱等，都需要你自己提前在 Cloudflare 后台配置好
+- 当 `Mail = Hotmail` 时，这个输入框由账号池自动同步当前账号邮箱
+- 当前 `Auto` 按钮只负责 DuckDuckGo 地址获取
 - 如果你使用 Inbucket，它只是验证码收件箱，不会自动生成 Inbucket 地址
 
 ### `邮箱生成 = Cloudflare` 时的配置
@@ -230,9 +253,11 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 
 1. Step 1 获取 CPA OAuth 链接
 2. Step 2 打开 OpenAI 注册页
-3. 按当前“邮箱生成”配置尝试自动获取邮箱（Duck 或 Cloudflare）
-4. 如果自动获取失败，暂停并等待你在侧边栏填写邮箱后点击 `Continue`
-5. 继续执行 Step 3 ~ Step 9
+3. 根据 `Mail` 选择邮箱来源
+4. 如果 `Mail = Hotmail`，会从账号池自动分配一个可用账号
+5. 如果不是 Hotmail，则按当前“邮箱生成”配置尝试自动获取邮箱（Duck 或 Cloudflare）
+6. 如果自动获取失败，暂停并等待你在侧边栏填写邮箱后点击 `Continue`
+7. 继续执行 Step 3 ~ Step 9
 
 也就是说：
 
@@ -277,10 +302,11 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 
 根据 `Mail` 配置，轮询邮箱并提取 6 位验证码。
 
-进入邮箱轮询前，脚本会先确认认证页是否已经进入验证码页面；如果密码页出现 `糟糕，出错了 / Operation timed out` 并带有 `重试` 按钮，会先自动点击 `重试`、回到密码页重新提交，再继续等待验证码页面。
+进入邮箱轮询前，脚本会先确认认证页是否已经进入验证码页面；如果密码页出现 `糟糕，出错了 / 操作超时（Operation timed out）` 并带有 `重试` 按钮，会先自动点击 `重试`、回到密码页重新提交，再继续等待验证码页面。
 
 支持：
 
+- `Hotmail`（Microsoft Graph 邮件接口）
 - `content/qq-mail.js`
 - `content/mail-163.js`
 - `content/inbucket-mail.js`
@@ -403,6 +429,7 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 - 邮箱服务
 - Inbucket 主机
 - Inbucket 邮箱名
+- Hotmail 账号池与对应令牌
 - 兜底开关
 
 特点：
@@ -422,6 +449,7 @@ data/names.js              随机姓名、生日数据
 content/utils.js           通用工具：等待元素、点击、日志、停止控制
 content/vps-panel.js       CPA 面板步骤：Step 1 / Step 9
 content/signup-page.js     OpenAI 注册/登录页步骤：Step 2 / 3 / 5 / 6 / 8
+hotmail-utils.js           Hotmail 收信相关通用辅助
 content/duck-mail.js       Duck 邮箱自动获取
 content/qq-mail.js         QQ 邮箱验证码轮询
 content/mail-163.js        163 邮箱验证码轮询

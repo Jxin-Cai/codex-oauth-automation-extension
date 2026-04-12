@@ -1,9 +1,32 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js');
+importScripts('data/names.js', 'hotmail-utils.js', 'content/activation-utils.js');
+
+const {
+  buildHotmailGraphMessagesUrl,
+  extractVerificationCodeFromMessage,
+  filterHotmailAccountsByUsage,
+  getLatestHotmailMessage,
+  getHotmailGraphRequestConfig,
+  getHotmailVerificationPollConfig,
+  getHotmailVerificationRequestTimestamp,
+  normalizeHotmailMailApiMessages,
+  pickHotmailAccountForRun,
+  pickVerificationMessage,
+  pickVerificationMessageWithFallback,
+  pickVerificationMessageWithTimeFallback,
+  shouldClearHotmailCurrentSelection,
+} = self.HotmailUtils;
+const {
+  isRecoverableStep9AuthFailure,
+} = self.MultiPageActivationUtils;
+const buildHotmailMailApiLatestUrl = buildHotmailGraphMessagesUrl;
+const getHotmailMailApiRequestConfig = getHotmailGraphRequestConfig;
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
+const HOTMAIL_PROVIDER = 'hotmail-api';
+const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
@@ -31,6 +54,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   inbucketMailbox: '', // 仅当 mailProvider 为 inbucket 时填写邮箱名，其他情况保持为空。
   cloudflareDomain: '', // 仅当 emailGenerator=cloudflare 时填写自定义域名。
   cloudflareDomains: [], // Cloudflare 可选域名列表。
+  hotmailAccounts: [],
 };
 
 const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
@@ -61,6 +85,9 @@ const DEFAULT_STATE = {
   autoRunAttemptRun: 0, // 当前轮次的重试序号。
   scheduledAutoRunAt: null, // 自动运行计划启动时间戳。
   scheduledAutoRunPlan: null, // 自动运行计划参数快照。
+  signupVerificationRequestedAt: null,
+  loginVerificationRequestedAt: null,
+  currentHotmailAccountId: null,
 };
 
 function normalizeAutoRunDelayMinutes(value) {
@@ -117,6 +144,7 @@ async function getPersistedSettings() {
     autoRunDelayEnabled: Boolean(stored.autoRunDelayEnabled ?? PERSISTED_SETTING_DEFAULTS.autoRunDelayEnabled),
     autoRunDelayMinutes: normalizeAutoRunDelayMinutes(stored.autoRunDelayMinutes ?? PERSISTED_SETTING_DEFAULTS.autoRunDelayMinutes),
     emailGenerator: normalizeEmailGenerator(stored.emailGenerator ?? PERSISTED_SETTING_DEFAULTS.emailGenerator),
+    hotmailAccounts: normalizeHotmailAccounts(stored.hotmailAccounts),
   };
 }
 
@@ -156,6 +184,8 @@ async function setPersistentSettings(updates) {
         persistedUpdates[key] = Boolean(updates[key]);
       } else if (key === 'autoRunDelayMinutes') {
         persistedUpdates[key] = normalizeAutoRunDelayMinutes(updates[key]);
+      } else if (key === 'hotmailAccounts') {
+        persistedUpdates[key] = normalizeHotmailAccounts(updates[key]);
       } else {
         persistedUpdates[key] = updates[key];
       }
@@ -236,6 +266,612 @@ function generatePassword() {
 
   // Shuffle
   return pw.split('').sort(() => Math.random() - 0.5).join('');
+}
+
+function normalizeHotmailAccount(account = {}) {
+  const normalizedLastAuthAt = Number.isFinite(Number(account.lastAuthAt)) ? Number(account.lastAuthAt) : 0;
+  const normalizedStatus = String(
+    account.status
+    || (normalizedLastAuthAt > 0 || account.accessToken ? 'authorized' : 'pending')
+  );
+  return {
+    id: String(account.id || crypto.randomUUID()),
+    email: String(account.email || '').trim(),
+    password: String(account.password || ''),
+    clientId: String(account.clientId || '').trim(),
+    accessToken: String(account.accessToken || ''),
+    refreshToken: String(account.refreshToken || ''),
+    expiresAt: Number.isFinite(Number(account.expiresAt)) ? Number(account.expiresAt) : 0,
+    status: normalizedStatus,
+    enabled: account.enabled !== undefined ? Boolean(account.enabled) : true,
+    used: Boolean(account.used),
+    lastUsedAt: Number.isFinite(Number(account.lastUsedAt)) ? Number(account.lastUsedAt) : 0,
+    lastAuthAt: normalizedLastAuthAt,
+    lastError: String(account.lastError || ''),
+  };
+}
+
+function normalizeHotmailAccounts(accounts) {
+  if (!Array.isArray(accounts)) return [];
+
+  const deduped = new Map();
+  for (const account of accounts) {
+    const normalized = normalizeHotmailAccount(account);
+    if (!normalized.email && !normalized.id) continue;
+    deduped.set(normalized.id, normalized);
+  }
+  return [...deduped.values()];
+}
+
+function findHotmailAccount(accounts, accountId) {
+  return normalizeHotmailAccounts(accounts).find((account) => account.id === accountId) || null;
+}
+
+function isHotmailProvider(stateOrProvider) {
+  const provider = typeof stateOrProvider === 'string'
+    ? stateOrProvider
+    : stateOrProvider?.mailProvider;
+  return provider === HOTMAIL_PROVIDER;
+}
+
+async function syncHotmailAccounts(accounts) {
+  const normalized = normalizeHotmailAccounts(accounts);
+  await setPersistentSettings({ hotmailAccounts: normalized });
+  await setState({ hotmailAccounts: normalized });
+  broadcastDataUpdate({ hotmailAccounts: normalized });
+  return normalized;
+}
+
+async function upsertHotmailAccount(input) {
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const normalizedEmail = String(input?.email || '').trim().toLowerCase();
+  const existing = input?.id
+    ? findHotmailAccount(accounts, input.id)
+    : accounts.find((account) => account.email.toLowerCase() === normalizedEmail) || null;
+  const credentialsChanged = !existing
+    || (input?.clientId !== undefined && String(input.clientId).trim() !== existing.clientId)
+    || (input?.refreshToken !== undefined && String(input.refreshToken).trim() !== existing.refreshToken)
+    || (input?.email !== undefined && String(input.email).trim().toLowerCase() !== existing.email.toLowerCase());
+  const normalized = normalizeHotmailAccount({
+    ...(existing || {}),
+    ...(credentialsChanged ? {
+      accessToken: '',
+      expiresAt: 0,
+      status: 'pending',
+      lastAuthAt: 0,
+      lastError: '',
+    } : {}),
+    ...input,
+    id: input?.id || existing?.id || crypto.randomUUID(),
+  });
+
+  const nextAccounts = existing
+    ? accounts.map((account) => (account.id === normalized.id ? normalized : account))
+    : [...accounts, normalized];
+
+  await syncHotmailAccounts(nextAccounts);
+  return normalized;
+}
+
+async function deleteHotmailAccount(accountId) {
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const nextAccounts = accounts.filter((account) => account.id !== accountId);
+  await syncHotmailAccounts(nextAccounts);
+
+  if (state.currentHotmailAccountId === accountId) {
+    await setState({ currentHotmailAccountId: null });
+    if (isHotmailProvider(state)) {
+      await setEmailState(null);
+    }
+    broadcastDataUpdate({ currentHotmailAccountId: null });
+  }
+}
+
+async function deleteHotmailAccounts(mode = 'all') {
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const targets = filterHotmailAccountsByUsage(accounts, mode);
+  const targetIds = new Set(targets.map((account) => account.id));
+  const nextAccounts = mode === 'used'
+    ? accounts.filter((account) => !targetIds.has(account.id))
+    : [];
+
+  await syncHotmailAccounts(nextAccounts);
+
+  if (state.currentHotmailAccountId && targetIds.has(state.currentHotmailAccountId)) {
+    await setState({ currentHotmailAccountId: null });
+    if (isHotmailProvider(state)) {
+      await setEmailState(null);
+    }
+    broadcastDataUpdate({ currentHotmailAccountId: null });
+  }
+
+  return {
+    deletedCount: targets.length,
+    remainingCount: nextAccounts.length,
+  };
+}
+
+async function patchHotmailAccount(accountId, updates = {}) {
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const account = findHotmailAccount(accounts, accountId);
+  if (!account) {
+    throw new Error('未找到对应的 Hotmail 账号。');
+  }
+
+  const nextAccount = normalizeHotmailAccount({
+    ...account,
+    ...updates,
+    id: account.id,
+  });
+
+  await syncHotmailAccounts(accounts.map((item) => (item.id === account.id ? nextAccount : item)));
+
+  if (state.currentHotmailAccountId === account.id && shouldClearHotmailCurrentSelection(nextAccount)) {
+    await setState({ currentHotmailAccountId: null });
+    broadcastDataUpdate({ currentHotmailAccountId: null });
+    if (isHotmailProvider(state)) {
+      await setEmailState(null);
+    }
+  }
+
+  return nextAccount;
+}
+
+async function setCurrentHotmailAccount(accountId, options = {}) {
+  const { markUsed = false, syncEmail = true } = options;
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const account = findHotmailAccount(accounts, accountId);
+  if (!account) {
+    throw new Error('未找到对应的 Hotmail 账号。');
+  }
+
+  if (markUsed) {
+    account.lastUsedAt = Date.now();
+    await syncHotmailAccounts(accounts.map((item) => (item.id === account.id ? account : item)));
+  }
+
+  await setState({ currentHotmailAccountId: account.id });
+  broadcastDataUpdate({ currentHotmailAccountId: account.id });
+  if (syncEmail) {
+    await setEmailState(account.email || null);
+  }
+  return account;
+}
+
+async function ensureHotmailAccountForFlow(options = {}) {
+  const { allowAllocate = true, markUsed = false, preferredAccountId = null } = options;
+  const state = await getState();
+  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+  const isAccountAllocatable = (candidate) => Boolean(candidate)
+    && candidate.status === 'authorized'
+    && !candidate.used
+    && Boolean(candidate.refreshToken);
+
+  let account = null;
+  if (preferredAccountId) {
+    account = findHotmailAccount(accounts, preferredAccountId);
+  }
+  if (!account && state.currentHotmailAccountId) {
+    account = findHotmailAccount(accounts, state.currentHotmailAccountId);
+  }
+  if ((!account || !isAccountAllocatable(account)) && allowAllocate) {
+    account = pickHotmailAccountForRun(accounts, {});
+  }
+
+  if (!account) {
+    throw new Error('没有可用的 Hotmail 账号。请先在侧边栏添加至少一个带刷新令牌（refresh token）的账号。');
+  }
+  if (!isAccountAllocatable(account)) {
+    throw new Error(`Hotmail 账号 ${account.email || account.id} 尚未就绪，无法读取邮件。`);
+  }
+
+  return setCurrentHotmailAccount(account.id, { markUsed, syncEmail: true });
+}
+
+async function requestHotmailMailApiLegacy(account, mailbox = 'INBOX') {
+  if (!account?.email) {
+    throw new Error('Hotmail 账号缺少邮箱地址。');
+  }
+  if (!account?.clientId) {
+    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少客户端 ID。`);
+  }
+  if (!account?.refreshToken) {
+    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少刷新令牌（refresh token）。`);
+  }
+
+  const url = buildHotmailMailApiLatestUrl({
+    clientId: account.clientId,
+    email: account.email,
+    refreshToken: account.refreshToken,
+    mailbox,
+    responseType: 'json',
+  });
+  const { timeoutMs } = getHotmailMailApiRequestConfig();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+
+  let response;
+  try {
+    response = await fetch(url, { method: 'GET', signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Hotmail API 请求超时（>${Math.round(timeoutMs / 1000)} 秒）：${mailbox}`);
+    }
+    throw new Error(`Hotmail API 请求失败：${err.message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+
+  if (!response.ok) {
+    const errorText = payload?.message || payload?.error || payload?.msg || text || `HTTP ${response.status}`;
+    throw new Error(`Hotmail API 请求失败：${errorText}`);
+  }
+
+  if (payload && payload.success === false) {
+    const errorText = payload?.message || payload?.msg || payload?.error || '未知错误';
+    throw new Error(`Hotmail API 返回失败：${errorText}`);
+  }
+
+  return {
+    mailbox,
+    payload,
+    messages: normalizeHotmailMailApiMessages(payload?.data),
+    nextRefreshToken: String(payload?.new_refresh_token || payload?.newRefreshToken || '').trim(),
+  };
+}
+
+function applyHotmailApiResultToAccountLegacy(account, apiResult) {
+  const nextRefreshToken = String(apiResult?.nextRefreshToken || '').trim();
+  return {
+    ...account,
+    accessToken: '',
+    expiresAt: 0,
+    refreshToken: nextRefreshToken || account.refreshToken,
+    status: 'authorized',
+    lastAuthAt: Date.now(),
+    lastError: '',
+  };
+}
+
+async function fetchHotmailMailboxMessagesLegacy(account, mailboxes = HOTMAIL_MAILBOXES) {
+  let workingAccount = normalizeHotmailAccount(account);
+  const mailboxResults = [];
+
+  for (const mailbox of mailboxes) {
+    const result = await requestHotmailMailApiLegacy(workingAccount, mailbox);
+    workingAccount = applyHotmailApiResultToAccountLegacy(workingAccount, result);
+    mailboxResults.push({
+      mailbox,
+      count: result.messages.length,
+      messages: result.messages.map((message) => ({ ...message, mailbox })),
+    });
+  }
+
+  const savedAccount = await upsertHotmailAccount(workingAccount);
+  return {
+    account: savedAccount,
+    mailboxResults,
+    messages: mailboxResults.flatMap((item) => item.messages),
+  };
+}
+
+function isHotmailAccessTokenUsable(account, now = Date.now()) {
+  return Boolean(account?.accessToken)
+    && Number(account?.expiresAt || 0) > now + 60_000;
+}
+
+async function refreshHotmailAccessToken(account) {
+  if (!account?.email) {
+    throw new Error('Hotmail 账号缺少邮箱地址。');
+  }
+  if (!account?.clientId) {
+    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少客户端 ID。`);
+  }
+  if (!account?.refreshToken) {
+    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少刷新令牌（refresh token）。`);
+  }
+
+  const { timeoutMs, scopes, tokenUrl } = getHotmailGraphRequestConfig();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+  const formData = new URLSearchParams();
+  formData.set('client_id', account.clientId);
+  formData.set('grant_type', 'refresh_token');
+  formData.set('refresh_token', account.refreshToken);
+  formData.set('scope', scopes.join(' '));
+
+  let response;
+  try {
+    response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const error = new Error(
+      err?.name === 'AbortError'
+        ? `Hotmail 令牌刷新超时（>${Math.round(timeoutMs / 1000)} 秒）`
+        : `Hotmail 令牌刷新失败：${err.message}`
+    );
+    error.code = 'HOTMAIL_TOKEN_REFRESH_FAILED';
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+
+  if (!response.ok || !payload?.access_token) {
+    const errorText = payload?.error_description || payload?.error?.message || payload?.error || payload?.message || text || `HTTP ${response.status}`;
+    const error = new Error(`Hotmail 令牌刷新失败：${errorText}`);
+    error.code = 'HOTMAIL_TOKEN_REFRESH_FAILED';
+    throw error;
+  }
+
+  const expiresInSeconds = Math.max(60, Number(payload.expires_in || payload.expiresIn || 0) || 3600);
+  return normalizeHotmailAccount({
+    ...account,
+    accessToken: String(payload.access_token || ''),
+    refreshToken: String(payload.refresh_token || '').trim() || account.refreshToken,
+    expiresAt: Date.now() + expiresInSeconds * 1000,
+    status: 'authorized',
+    lastAuthAt: Date.now(),
+    lastError: '',
+  });
+}
+
+async function requestHotmailGraphMessages(account, mailbox = 'INBOX') {
+  const { timeoutMs, pageSize, messageFields } = getHotmailGraphRequestConfig();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+  const url = buildHotmailGraphMessagesUrl({
+    mailbox,
+    top: pageSize,
+    selectFields: messageFields,
+  });
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${account.accessToken}`,
+      },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const error = new Error(
+      err?.name === 'AbortError'
+        ? `Hotmail 邮件请求超时（>${Math.round(timeoutMs / 1000)} 秒）：${mailbox}`
+        : `Hotmail 邮件请求失败：${err.message}`
+    );
+    error.code = 'HOTMAIL_GRAPH_REQUEST_FAILED';
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+
+  if (!response.ok) {
+    const errorText = payload?.error?.message || payload?.error_description || payload?.message || text || `HTTP ${response.status}`;
+    const error = new Error(`Hotmail 邮件请求失败：${errorText}`);
+    error.code = response.status === 401 || response.status === 403
+      ? 'HOTMAIL_GRAPH_AUTH_FAILED'
+      : 'HOTMAIL_GRAPH_REQUEST_FAILED';
+    throw error;
+  }
+
+  return {
+    mailbox,
+    payload,
+    messages: normalizeHotmailMailApiMessages(payload?.value),
+  };
+}
+
+function buildHotmailAuthFailureAccount(account, errorMessage) {
+  return normalizeHotmailAccount({
+    ...account,
+    accessToken: '',
+    expiresAt: 0,
+    status: 'error',
+    lastError: String(errorMessage || ''),
+  });
+}
+
+async function fetchHotmailMailboxMessages(account, mailboxes = HOTMAIL_MAILBOXES) {
+  let workingAccount = normalizeHotmailAccount(account);
+  const mailboxResults = [];
+
+  try {
+    if (!isHotmailAccessTokenUsable(workingAccount)) {
+      workingAccount = await refreshHotmailAccessToken(workingAccount);
+    }
+
+    for (const mailbox of mailboxes) {
+      let result;
+      try {
+        result = await requestHotmailGraphMessages(workingAccount, mailbox);
+      } catch (err) {
+        if (err?.code !== 'HOTMAIL_GRAPH_AUTH_FAILED') {
+          throw err;
+        }
+
+        workingAccount = await refreshHotmailAccessToken({
+          ...workingAccount,
+          accessToken: '',
+          expiresAt: 0,
+        });
+        result = await requestHotmailGraphMessages(workingAccount, mailbox);
+      }
+
+      mailboxResults.push({
+        mailbox,
+        count: result.messages.length,
+        messages: result.messages.map((message) => ({ ...message, mailbox })),
+      });
+    }
+  } catch (err) {
+    if (err?.code === 'HOTMAIL_TOKEN_REFRESH_FAILED' || err?.code === 'HOTMAIL_GRAPH_AUTH_FAILED') {
+      const failedAccount = buildHotmailAuthFailureAccount(workingAccount, err.message);
+      await upsertHotmailAccount(failedAccount);
+    }
+    throw err;
+  }
+
+  const savedAccount = await upsertHotmailAccount(workingAccount);
+  return {
+    account: savedAccount,
+    mailboxResults,
+    messages: mailboxResults.flatMap((item) => item.messages),
+  };
+}
+
+async function verifyHotmailAccount(accountId) {
+  const state = await getState();
+  const account = findHotmailAccount(state.hotmailAccounts, accountId);
+  if (!account) {
+    throw new Error('未找到需要校验的 Hotmail 账号。');
+  }
+
+  const result = await fetchHotmailMailboxMessages(account, ['INBOX']);
+  return {
+    account: result.account,
+    messageCount: result.mailboxResults[0]?.count || 0,
+  };
+}
+
+async function testHotmailAccountMailAccess(accountId) {
+  const state = await getState();
+  const account = findHotmailAccount(state.hotmailAccounts, accountId);
+  if (!account) {
+    throw new Error('未找到需要测试的 Hotmail 账号。');
+  }
+
+  const result = await fetchHotmailMailboxMessages(account, HOTMAIL_MAILBOXES);
+  const latestMessage = getLatestHotmailMessage(result.messages);
+  const latestCode = latestMessage ? extractVerificationCodeFromMessage(latestMessage) : null;
+
+  return {
+    account: result.account,
+    accountId: result.account.id,
+    email: result.account.email,
+    messageCount: result.messages.length,
+    latestSubject: latestMessage?.subject || '',
+    latestMailbox: latestMessage?.mailbox || '',
+    latestCode: latestCode || '',
+    inboxCount: result.mailboxResults.find((item) => item.mailbox === 'INBOX')?.count || 0,
+    junkCount: result.mailboxResults.find((item) => item.mailbox === 'Junk')?.count || 0,
+  };
+}
+
+async function pollHotmailVerificationCode(step, state, pollPayload = {}) {
+  await addLog(`步骤 ${step}：正在确定 Hotmail 收信账号...`, 'info');
+  let account = await ensureHotmailAccountForFlow({
+    allowAllocate: true,
+    markUsed: false,
+    preferredAccountId: state.currentHotmailAccountId || null,
+  });
+  await addLog(`步骤 ${step}：当前使用 Hotmail 账号 ${account.email} 轮询收件箱。`, 'info');
+
+  const maxAttempts = Number(pollPayload.maxAttempts) || 5;
+  const intervalMs = Number(pollPayload.intervalMs) || 3000;
+  let lastError = null;
+
+  function summarizeMessagesForLog(messages) {
+    return (messages || [])
+      .slice()
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.receivedDateTime || '') || 0;
+        const rightTime = Date.parse(right.receivedDateTime || '') || 0;
+        return rightTime - leftTime;
+      })
+      .slice(0, 3)
+      .map((message) => {
+        const receivedAt = message?.receivedDateTime || '未知时间';
+        const sender = message?.from?.emailAddress?.address || '未知发件人';
+        const subject = message?.subject || '（无主题）';
+        const preview = String(message?.bodyPreview || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        return `[${message.mailbox || 'INBOX'}] ${receivedAt} | ${sender} | ${subject} | ${preview}`;
+      })
+      .join(' || ');
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfStopped();
+    try {
+      await addLog(`步骤 ${step}：正在轮询 Hotmail 邮件（${attempt}/${maxAttempts}）...`, 'info');
+      const fetchResult = await fetchHotmailMailboxMessages(account, HOTMAIL_MAILBOXES);
+      account = fetchResult.account;
+      const matchResult = pickVerificationMessageWithTimeFallback(fetchResult.messages, {
+        afterTimestamp: pollPayload.filterAfterTimestamp || 0,
+        senderFilters: pollPayload.senderFilters || [],
+        subjectFilters: pollPayload.subjectFilters || [],
+        excludeCodes: pollPayload.excludeCodes || [],
+      });
+      const match = matchResult.match;
+
+      if (match?.code) {
+        const mailboxLabel = match.message?.mailbox || 'INBOX';
+        if (matchResult.usedRelaxedFilters) {
+          const fallbackLabel = matchResult.usedTimeFallback ? '宽松匹配 + 时间回退' : '宽松匹配';
+          await addLog(`步骤 ${step}：严格规则未命中，已改用 ${fallbackLabel} 并命中 Hotmail ${mailboxLabel} 验证码。`, 'warn');
+        }
+        await addLog(`步骤 ${step}：已在 Hotmail ${mailboxLabel} 中找到验证码：${match.code}`, 'ok');
+        return {
+          ok: true,
+          code: match.code,
+          emailTimestamp: match.receivedAt || Date.now(),
+          mailId: match.message?.id || '',
+        };
+      }
+
+      lastError = new Error(`步骤 ${step}：暂未在 Hotmail 收件箱中找到匹配验证码（${attempt}/${maxAttempts}）。`);
+      await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
+      const mailSummary = summarizeMessagesForLog(fetchResult.messages);
+      if (mailSummary) {
+        await addLog(`步骤 ${step}：最近邮件样本：${mailSummary}`, 'info');
+      }
+    } catch (err) {
+      lastError = err;
+      await addLog(`步骤 ${step}：Hotmail 收件箱轮询失败：${err.message}`, 'warn');
+    }
+
+    if (attempt < maxAttempts) {
+      await sleepWithStop(intervalMs);
+    }
+  }
+
+  throw lastError || new Error(`步骤 ${step}：未在 Hotmail 收件箱中找到新的匹配验证码。`);
 }
 
 // ============================================================
@@ -990,6 +1626,7 @@ function getSourceLabel(source) {
     'mail-163': '163 邮箱',
     'inbucket-mail': 'Inbucket 邮箱',
     'duck-mail': 'Duck 邮箱',
+    'hotmail-api': 'Hotmail（微软 Graph）',
   };
   return labels[source] || source || '未知来源';
 }
@@ -1026,7 +1663,7 @@ function getErrorMessage(error) {
 
 function isVerificationMailPollingError(error) {
   const message = getErrorMessage(error);
-  return /未在 .*邮箱中找到新的匹配邮件|邮箱轮询结束，但未获取到验证码|无法获取新的(?:注册|登录)验证码|页面未能重新就绪|页面通信异常|did not respond in \d+s/i.test(message);
+  return /未在 .*邮箱中找到新的匹配邮件|未在 Hotmail 收件箱中找到新的匹配验证码|邮箱轮询结束，但未获取到验证码|无法获取新的(?:注册|登录)验证码|页面未能重新就绪|页面通信异常|did not respond in \d+s/i.test(message);
 }
 
 const STEP7_RESTART_FROM_STEP6_ERROR_CODE = 'STEP7_RESTART_FROM_STEP6';
@@ -1084,7 +1721,13 @@ function isRestartCurrentAttemptError(error) {
   return /当前邮箱已存在，需要重新开始新一轮/.test(message);
 }
 
-function isStep9OAuthTimeoutError(error) {
+function isStep9RecoverableAuthError(error) {
+  const message = String(typeof error === 'string' ? error : error?.message || '');
+  return /STEP9_OAUTH_RETRY::/i.test(message)
+    || isRecoverableStep9AuthFailure(message);
+}
+
+function isLegacyStep9RecoverableAuthError(error) {
   const message = String(typeof error === 'string' ? error : error?.message || '');
   return /STEP9_OAUTH_TIMEOUT::|认证失败:\s*Timeout waiting for OAuth callback/i.test(message);
 }
@@ -1113,6 +1756,8 @@ function getDownstreamStateResets(step) {
       flowStartTime: null,
       password: null,
       lastEmailTimestamp: null,
+      signupVerificationRequestedAt: null,
+      loginVerificationRequestedAt: null,
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
@@ -1122,6 +1767,8 @@ function getDownstreamStateResets(step) {
     return {
       password: null,
       lastEmailTimestamp: null,
+      signupVerificationRequestedAt: null,
+      loginVerificationRequestedAt: null,
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
@@ -1130,6 +1777,8 @@ function getDownstreamStateResets(step) {
   if (step === 3 || step === 4) {
     return {
       lastEmailTimestamp: null,
+      signupVerificationRequestedAt: null,
+      loginVerificationRequestedAt: null,
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
@@ -1138,6 +1787,7 @@ function getDownstreamStateResets(step) {
   if (step === 5 || step === 6 || step === 7) {
     return {
       lastLoginCode: null,
+      loginVerificationRequestedAt: null,
       localhostUrl: null,
     };
   }
@@ -1753,6 +2403,63 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
+    case 'UPSERT_HOTMAIL_ACCOUNT': {
+      const account = await upsertHotmailAccount(message.payload || {});
+      return { ok: true, account };
+    }
+
+    case 'DELETE_HOTMAIL_ACCOUNT': {
+      await deleteHotmailAccount(String(message.payload?.accountId || ''));
+      return { ok: true };
+    }
+
+    case 'DELETE_HOTMAIL_ACCOUNTS': {
+      const result = await deleteHotmailAccounts(String(message.payload?.mode || 'all'));
+      return { ok: true, ...result };
+    }
+
+    case 'SELECT_HOTMAIL_ACCOUNT': {
+      const account = await setCurrentHotmailAccount(String(message.payload?.accountId || ''), {
+        markUsed: false,
+        syncEmail: true,
+      });
+      return { ok: true, account };
+    }
+
+    case 'PATCH_HOTMAIL_ACCOUNT': {
+      const account = await patchHotmailAccount(
+        String(message.payload?.accountId || ''),
+        message.payload?.updates || {}
+      );
+      return { ok: true, account };
+    }
+
+    case 'VERIFY_HOTMAIL_ACCOUNT':
+    case 'AUTHORIZE_HOTMAIL_ACCOUNT': {
+      const accountId = String(message.payload?.accountId || '');
+      try {
+        const result = await verifyHotmailAccount(accountId);
+        await setCurrentHotmailAccount(result.account.id, { markUsed: false, syncEmail: true });
+        await addLog(`Hotmail 账号 ${result.account.email} 校验通过，可直接用于收信。`, 'ok');
+        return { ok: true, account: result.account, messageCount: result.messageCount };
+      } catch (err) {
+        const state = await getState();
+        const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
+        const target = findHotmailAccount(accounts, accountId);
+        if (target) {
+          target.status = 'error';
+          target.lastError = err.message;
+          await syncHotmailAccounts(accounts.map((item) => (item.id === target.id ? target : item)));
+        }
+        throw err;
+      }
+    }
+
+    case 'TEST_HOTMAIL_ACCOUNT': {
+      const result = await testHotmailAccountMailAccess(String(message.payload?.accountId || ''));
+      return { ok: true, ...result };
+    }
+
     // Side panel data updates
     case 'SAVE_EMAIL': {
       const state = await getState();
@@ -1811,9 +2518,29 @@ async function handleStepData(step, payload) {
       break;
     case 3:
       if (payload.email) await setEmailState(payload.email);
+      if (payload.signupVerificationRequestedAt) {
+        await setState({ signupVerificationRequestedAt: payload.signupVerificationRequestedAt });
+      }
+      if (payload.loginVerificationRequestedAt) {
+        await setState({ loginVerificationRequestedAt: payload.loginVerificationRequestedAt });
+      }
+      break;
+    case 6:
+      if (payload.loginVerificationRequestedAt) {
+        await setState({ loginVerificationRequestedAt: payload.loginVerificationRequestedAt });
+      }
       break;
     case 4:
-      if (payload.emailTimestamp) await setState({ lastEmailTimestamp: payload.emailTimestamp });
+      await setState({
+        lastEmailTimestamp: payload.emailTimestamp || null,
+        signupVerificationRequestedAt: null,
+      });
+      break;
+    case 7:
+      await setState({
+        lastEmailTimestamp: payload.emailTimestamp || null,
+        loginVerificationRequestedAt: null,
+      });
       break;
     case 8:
       if (payload.localhostUrl) {
@@ -1827,6 +2554,18 @@ async function handleStepData(step, payload) {
     case 9: {
       if (payload.localhostUrl) {
         await closeLocalhostCallbackTabs(payload.localhostUrl);
+      }
+      const latestState = await getState();
+      if (latestState.currentHotmailAccountId && isHotmailProvider(latestState)) {
+        await patchHotmailAccount(latestState.currentHotmailAccountId, {
+          used: true,
+          lastUsedAt: Date.now(),
+        });
+        await addLog('当前 Hotmail 账号已自动标记为已用。', 'ok');
+      }
+      const localhostPrefix = buildLocalhostCleanupPrefix(payload.localhostUrl);
+      if (localhostPrefix) {
+        await closeTabsByUrlPrefix(localhostPrefix);
       }
       break;
     }
@@ -1853,7 +2592,7 @@ function waitForStepComplete(step, timeoutMs = 120000) {
     const timer = setTimeout(() => {
       stepWaiters.delete(step);
       console.warn(LOG_PREFIX, `[waitForStepComplete] timeout for step ${step} after ${timeoutMs}ms`);
-      reject(new Error(`Step ${step} timed out after ${timeoutMs / 1000}s`));
+      reject(new Error(`步骤 ${step} 等待超时（>${timeoutMs / 1000} 秒）`));
     }, timeoutMs);
 
     stepWaiters.set(step, {
@@ -2138,6 +2877,16 @@ async function resumeAutoRunIfWaitingForEmail(options = {}) {
 
 async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
   const currentState = await getState();
+  if (isHotmailProvider(currentState)) {
+    const account = await ensureHotmailAccountForFlow({
+      allowAllocate: true,
+      markUsed: true,
+      preferredAccountId: null,
+    });
+    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：已分配 Hotmail 账号 ${account.email}（第 ${attemptRuns} 次尝试）===`, 'ok');
+    return account.email;
+  }
+
   if (currentState.email) {
     return currentState.email;
   }
@@ -2224,14 +2973,23 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
       await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
       step += 1;
     } catch (err) {
-      if (step === 9 && isStep9OAuthTimeoutError(err) && step9RestartAttempts < maxStep9RestartAttempts) {
+      const latestState = await getState();
+      const currentMail = getMailConfig(latestState);
+      const shouldRetryStep9 = step === 9
+        && (
+          isLegacyStep9RecoverableAuthError(err)
+          || (currentMail.provider === HOTMAIL_PROVIDER && isStep9RecoverableAuthError(err))
+        )
+        && step9RestartAttempts < maxStep9RestartAttempts;
+
+      if (shouldRetryStep9) {
         step9RestartAttempts += 1;
         await addLog(
-          `步骤 9：检测到 OAuth callback 超时，正在回到步骤 6 重新开始授权流程（${step9RestartAttempts}/${maxStep9RestartAttempts}）...`,
+          `步骤 9：检测到 CPA 认证失败，正在回到步骤 6 重新开始授权流程（${step9RestartAttempts}/${maxStep9RestartAttempts}）...`,
           'warn'
         );
         await invalidateDownstreamAfterStepRestart(6, {
-          logLabel: `步骤 9 超时后准备回到步骤 6 重试（${step9RestartAttempts}/${maxStep9RestartAttempts}）`,
+          logLabel: `步骤 9 认证失败后准备回到步骤 6 重试（${step9RestartAttempts}/${maxStep9RestartAttempts}）`,
         });
         step = 6;
         continue;
@@ -2495,7 +3253,7 @@ async function executeStep1(state) {
   }
   await addLog('步骤 1：正在打开 CPA 面板...');
 
-  const injectFiles = ['content/utils.js', 'content/vps-panel.js'];
+  const injectFiles = ['content/activation-utils.js', 'content/utils.js', 'content/vps-panel.js'];
 
   await closeConflictingTabsForSource('vps-panel', state.vpsUrl);
 
@@ -2559,26 +3317,39 @@ async function executeStep2(state) {
 // ============================================================
 
 async function executeStep3(state) {
-  if (!state.email) {
+  let resolvedEmail = state.email;
+  if (isHotmailProvider(state)) {
+    const account = await ensureHotmailAccountForFlow({
+      allowAllocate: true,
+      markUsed: true,
+      preferredAccountId: state.currentHotmailAccountId || null,
+    });
+    resolvedEmail = account.email;
+  }
+
+  if (!resolvedEmail) {
     throw new Error('缺少邮箱地址，请先在侧边栏粘贴邮箱。');
   }
 
   const password = state.customPassword || generatePassword();
+  if (resolvedEmail !== state.email) {
+    await setEmailState(resolvedEmail);
+  }
   await setPasswordState(password);
 
   // Save account record
   const accounts = state.accounts || [];
-  accounts.push({ email: state.email, password, createdAt: new Date().toISOString() });
+  accounts.push({ email: resolvedEmail, password, createdAt: new Date().toISOString() });
   await setState({ accounts });
 
   await addLog(
-    `步骤 3：正在填写邮箱 ${state.email}，密码为${state.customPassword ? '自定义' : '自动生成'}（${password.length} 位）`
+    `步骤 3：正在填写邮箱 ${resolvedEmail}，密码为${state.customPassword ? '自定义' : '自动生成'}（${password.length} 位）`
   );
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 3,
     source: 'background',
-    payload: { email: state.email, password },
+    payload: { email: resolvedEmail, password },
   });
 }
 
@@ -2588,6 +3359,9 @@ async function executeStep3(state) {
 
 function getMailConfig(state) {
   const provider = state.mailProvider || 'qq';
+  if (provider === HOTMAIL_PROVIDER) {
+    return { provider: HOTMAIL_PROVIDER, label: 'Hotmail（微软 Graph）' };
+  }
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 邮箱' };
   }
@@ -2608,7 +3382,7 @@ function getMailConfig(state) {
       url: `${host}/m/${encodeURIComponent(mailbox)}/`,
       label: `Inbucket 邮箱（${mailbox}）`,
       navigateOnReuse: true,
-      inject: ['content/utils.js', 'content/inbucket-mail.js'],
+      inject: ['content/activation-utils.js', 'content/utils.js', 'content/inbucket-mail.js'],
       injectSource: 'inbucket-mail',
     };
   }
@@ -2640,7 +3414,7 @@ function getVerificationCodeLabel(step) {
 function getVerificationPollPayload(step, state, overrides = {}) {
   if (step === 4) {
     return {
-      filterAfterTimestamp: state.flowStartTime || 0,
+      filterAfterTimestamp: getHotmailVerificationRequestTimestamp(4, state),
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm'],
       targetEmail: state.email,
@@ -2651,7 +3425,7 @@ function getVerificationPollPayload(step, state, overrides = {}) {
   }
 
   return {
-    filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
+    filterAfterTimestamp: getHotmailVerificationRequestTimestamp(7, state),
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
     subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm', 'login'],
     targetEmail: state.email,
@@ -2692,6 +3466,15 @@ async function requestVerificationCodeResend(step) {
 }
 
 async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) {
+  if (mail.provider === HOTMAIL_PROVIDER) {
+    const hotmailPollConfig = getHotmailVerificationPollConfig(step);
+    return pollHotmailVerificationCode(step, state, {
+      ...getVerificationPollPayload(step, state),
+      ...hotmailPollConfig,
+      ...pollOverrides,
+    });
+  }
+
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
   if (state[stateKey]) {
@@ -2787,12 +3570,18 @@ async function submitVerificationCode(step, code) {
 async function resolveVerificationStep(step, state, mail, options = {}) {
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
-  if (state[stateKey]) {
+  const hotmailPollConfig = mail.provider === HOTMAIL_PROVIDER
+    ? getHotmailVerificationPollConfig(step)
+    : null;
+  const ignorePersistedLastCode = Boolean(hotmailPollConfig?.ignorePersistedLastCode);
+  if (state[stateKey] && !ignorePersistedLastCode) {
     rejectedCodes.add(state[stateKey]);
   }
 
   const nextFilterAfterTimestamp = options.filterAfterTimestamp ?? null;
-  const requestFreshCodeFirst = Boolean(options.requestFreshCodeFirst);
+  const requestFreshCodeFirst = options.requestFreshCodeFirst !== undefined
+    ? Boolean(options.requestFreshCodeFirst)
+    : (hotmailPollConfig?.requestFreshCodeFirst ?? false);
   const maxSubmitAttempts = 3;
 
   if (requestFreshCodeFirst) {
@@ -2804,6 +3593,14 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
         throw err;
       }
       await addLog(`步骤 ${step}：首次重新获取验证码失败：${err.message}，将继续使用当前时间窗口轮询。`, 'warn');
+    }
+  }
+
+  if (mail.provider === HOTMAIL_PROVIDER) {
+    const initialDelayMs = Number(options.initialDelayMs ?? hotmailPollConfig.initialDelayMs) || 0;
+    if (initialDelayMs > 0) {
+      await addLog(`步骤 ${step}：等待 ${Math.round(initialDelayMs / 1000)} 秒，让 Hotmail 验证码邮件先到达...`, 'info');
+      await sleepWithStop(initialDelayMs);
     }
   }
 
@@ -2871,35 +3668,42 @@ async function executeStep4(state) {
   if (prepareResult && prepareResult.error) {
     throw new Error(prepareResult.error);
   }
+  if (prepareResult?.verificationRequestedAt) {
+    await setState({ loginVerificationRequestedAt: prepareResult.verificationRequestedAt });
+  }
   if (prepareResult?.alreadyVerified) {
     await completeStepFromBackground(4, {});
     return;
   }
 
-  await addLog(`步骤 4：正在打开${mail.label}...`);
+  if (mail.provider === HOTMAIL_PROVIDER) {
+    await addLog(`步骤 4：正在通过 ${mail.label} 轮询验证码...`);
+  } else {
+    await addLog(`步骤 4：正在打开${mail.label}...`);
 
-  // For mail tabs, only create if not alive — don't navigate (preserves login session)
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
+    // For mail tabs, only create if not alive — don't navigate (preserves login session)
+    const alive = await isTabAlive(mail.source);
+    if (alive) {
+      if (mail.navigateOnReuse) {
+        await reuseOrCreateTab(mail.source, mail.url, {
+          inject: mail.inject,
+          injectSource: mail.injectSource,
+        });
+      } else {
+        const tabId = await getTabId(mail.source);
+        await chrome.tabs.update(tabId, { active: true });
+      }
+    } else {
       await reuseOrCreateTab(mail.source, mail.url, {
         inject: mail.inject,
         injectSource: mail.injectSource,
       });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
     }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
   }
 
   await resolveVerificationStep(4, state, mail, {
-    filterAfterTimestamp: stepStartedAt,
-    requestFreshCodeFirst: true,
+    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
+    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
   });
   return;
 }
@@ -3004,29 +3808,33 @@ async function runStep7Attempt(state) {
     throw new Error(prepareResult.error);
   }
 
-  await addLog(`步骤 7：正在打开${mail.label}...`);
+  if (mail.provider === HOTMAIL_PROVIDER) {
+    await addLog(`步骤 7：正在通过 ${mail.label} 轮询验证码...`);
+  } else {
+    await addLog(`步骤 7：正在打开${mail.label}...`);
 
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
+    const alive = await isTabAlive(mail.source);
+    if (alive) {
+      if (mail.navigateOnReuse) {
+        await reuseOrCreateTab(mail.source, mail.url, {
+          inject: mail.inject,
+          injectSource: mail.injectSource,
+        });
+      } else {
+        const tabId = await getTabId(mail.source);
+        await chrome.tabs.update(tabId, { active: true });
+      }
+    } else {
       await reuseOrCreateTab(mail.source, mail.url, {
         inject: mail.inject,
         injectSource: mail.injectSource,
       });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
     }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
   }
 
   await resolveVerificationStep(7, state, mail, {
-    filterAfterTimestamp: stepStartedAt,
-    requestFreshCodeFirst: true,
+    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
+    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
   });
 }
 
@@ -3489,7 +4297,7 @@ async function executeStep9(state) {
 
   await addLog('步骤 9：正在打开 CPA 面板...');
 
-  const injectFiles = ['content/utils.js', 'content/vps-panel.js'];
+  const injectFiles = ['content/activation-utils.js', 'content/utils.js', 'content/vps-panel.js'];
   let tabId = await getTabId('vps-panel');
   const alive = tabId && await isTabAlive('vps-panel');
 
@@ -3506,6 +4314,9 @@ async function executeStep9(state) {
 
   await ensureContentScriptReadyOnTab('vps-panel', tabId, {
     inject: injectFiles,
+    timeoutMs: 45000,
+    retryDelayMs: 900,
+    logMessage: '姝ラ 9锛欳PA 闈㈡澘浠嶅湪鍔犺浇锛屾鍦ㄩ噸璇曡繛鎺ュ唴瀹硅剼鏈?..',
   });
 
   await addLog('步骤 9：正在填写回调地址...');

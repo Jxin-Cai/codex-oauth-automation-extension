@@ -26,6 +26,9 @@
 console.log('[MultiPage:vps-panel] Content script loaded on', location.href);
 
 const VPS_PANEL_LISTENER_SENTINEL = 'data-multipage-vps-panel-listener';
+const {
+  isRecoverableStep9AuthFailure,
+} = self.MultiPageActivationUtils || {};
 
 if (document.documentElement.getAttribute(VPS_PANEL_LISTENER_SENTINEL) !== '1') {
   document.documentElement.setAttribute(VPS_PANEL_LISTENER_SENTINEL, '1');
@@ -208,6 +211,12 @@ async function waitForExactSuccessBadge(timeout = 30000) {
   while (Date.now() - start < timeout) {
     throwIfStopped();
     const statusText = getStatusBadgeText();
+    if (isOAuthCallbackTimeoutFailure(statusText)) {
+      throw new Error(`STEP9_OAUTH_TIMEOUT::${statusText}`);
+    }
+    if (typeof isRecoverableStep9AuthFailure === 'function' && isRecoverableStep9AuthFailure(statusText)) {
+      throw new Error(`STEP9_OAUTH_RETRY::${statusText}`);
+    }
     if (statusText === '认证成功！') {
       return statusText;
     }
@@ -217,6 +226,9 @@ async function waitForExactSuccessBadge(timeout = 30000) {
   const finalText = getStatusBadgeText();
   if (isOAuthCallbackTimeoutFailure(finalText)) {
     throw new Error(`STEP9_OAUTH_TIMEOUT::${finalText}`);
+  }
+  if (typeof isRecoverableStep9AuthFailure === 'function' && isRecoverableStep9AuthFailure(finalText)) {
+    throw new Error(`STEP9_OAUTH_RETRY::${finalText}`);
   }
   throw new Error(finalText
     ? `CPA 面板状态不是“认证成功！”，当前为“${finalText}”。`

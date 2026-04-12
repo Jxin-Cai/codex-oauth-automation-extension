@@ -233,9 +233,10 @@ async function prepareLoginCodeFlow(timeout = 15000) {
       loggedPasswordPage = false;
       log('步骤 7：检测到密码页，正在切换到一次性验证码登录...');
       await humanPause(350, 900);
+      const verificationRequestedAt = Date.now();
       simulateClick(switchTrigger);
       await sleep(1200);
-      continue;
+      return { ready: true, mode: 'verification_switch', verificationRequestedAt };
     }
 
     if (passwordInput && !loggedPasswordPage) {
@@ -372,15 +373,16 @@ async function step3_fillEmailPassword(payload) {
   fillInput(passwordInput, payload.password);
   log('步骤 3：密码已填写');
 
-  // Report complete BEFORE submit, because submit causes page navigation
-  // which kills the content script connection
-  reportComplete(3, { email });
-
-  // Submit the form (page will navigate away after this)
-  await sleep(500);
   const submitBtn = document.querySelector('button[type="submit"]')
     || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 5000).catch(() => null);
 
+  // Report complete BEFORE submit, because submit causes page navigation
+  // which kills the content script connection
+  const signupVerificationRequestedAt = submitBtn ? Date.now() : null;
+  reportComplete(3, { email, signupVerificationRequestedAt });
+
+  // Submit the form (page will navigate away after this)
+  await sleep(500);
   if (submitBtn) {
     await humanPause(500, 1300);
     simulateClick(submitBtn);

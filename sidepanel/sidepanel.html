@@ -1,19 +1,24 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>多页面自动化面板</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="sidepanel.css">
 </head>
+
 <body>
   <header>
     <div class="header-left">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
       </svg>
       <h1>多页面</h1>
     </div>
@@ -21,22 +26,36 @@
       <div class="run-group">
         <input type="number" id="input-run-count" class="run-count-input" value="1" min="1" max="50" title="运行次数" />
         <button id="btn-auto-run" class="btn btn-success" title="自动执行全部步骤">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
           自动
         </button>
         <button id="btn-stop" class="btn btn-danger" title="停止当前流程" disabled>停止</button>
       </div>
       <button id="btn-reset" class="btn btn-ghost" title="重置全部步骤">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10" />
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
         </svg>
       </button>
       <button id="btn-theme" class="theme-toggle" title="切换主题">
-        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
         </svg>
-        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5" />
+          <line x1="12" y1="1" x2="12" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="23" />
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+          <line x1="1" y1="12" x2="3" y2="12" />
+          <line x1="21" y1="12" x2="23" y2="12" />
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
         </svg>
       </button>
     </div>
@@ -47,13 +66,27 @@
       <div class="data-row">
         <span class="data-label">CPA</span>
         <div class="input-with-icon">
-          <input type="password" id="input-vps-url" class="data-input data-input-with-icon" placeholder="http://ip:port/management.html#/oauth" />
-          <button id="btn-toggle-vps-url" class="input-icon-btn" type="button" aria-label="显示 CPA 地址" title="显示 CPA 地址"></button>
+          <input type="password" id="input-vps-url" class="data-input data-input-with-icon"
+            placeholder="http://ip:port/management.html#/oauth" />
+          <button id="btn-toggle-vps-url" class="input-icon-btn" type="button" aria-label="显示 CPA 地址"
+            title="显示 CPA 地址"></button>
         </div>
       </div>
       <div class="data-row">
         <span class="data-label">管理密钥</span>
         <input type="password" id="input-vps-password" class="data-input" placeholder="请输入 CPA 管理密钥" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">codex密码</span>
+        <div class="data-inline">
+          <div class="input-with-icon">
+            <input type="password" id="input-password" class="data-input data-input-with-icon"
+              placeholder="codex密码，留空则自动生成" />
+            <button id="btn-toggle-password" class="input-icon-btn" type="button" aria-label="显示密码"
+              title="显示密码"></button>
+          </div>
+          <button id="btn-save-settings" class="btn btn-outline btn-sm" type="button">保存</button>
+        </div>
       </div>
       <div class="data-row">
         <span class="data-label">邮箱服务</span>
@@ -64,6 +97,22 @@
           <option value="inbucket">Inbucket（自定义主机）</option>
         </select>
       </div>
+      <div class="data-row">
+        <span class="data-label">邮箱生成</span>
+        <select id="select-email-generator" class="data-select">
+          <option value="duck">DuckDuckGo</option>
+          <option value="cloudflare">Cloudflare</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-cf-domain" style="display:none;">
+        <span class="data-label">CF 域名</span>
+        <div class="data-inline">
+          <select id="select-cf-domain" class="data-select"></select>
+          <input type="text" id="input-cf-domain" class="data-input" placeholder="例如 yourdomain.xyz"
+            style="display:none;" />
+          <button id="btn-cf-domain-mode" class="btn btn-outline btn-sm" type="button">添加</button>
+        </div>
+      </div>
       <div class="data-row" id="row-inbucket-host" style="display:none;">
         <span class="data-label">Inbucket</span>
         <input type="text" id="input-inbucket-host" class="data-input" placeholder="填写主机或 https://主机地址" />
@@ -73,20 +122,10 @@
         <input type="text" id="input-inbucket-mailbox" class="data-input" placeholder="例如 zju2001" />
       </div>
       <div class="data-row">
-        <span class="data-label">邮箱</span>
+        <span class="data-label">注册邮箱</span>
         <div class="data-inline">
-          <input type="text" id="input-email" class="data-input" placeholder="粘贴 DuckDuckGo 邮箱" />
+          <input type="text" id="input-email" class="data-input" placeholder="自动生成或手动粘贴邮箱" />
           <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">获取</button>
-        </div>
-      </div>
-      <div class="data-row">
-        <span class="data-label">密码</span>
-        <div class="data-inline">
-          <div class="input-with-icon">
-            <input type="password" id="input-password" class="data-input data-input-with-icon" placeholder="留空则自动生成" />
-            <button id="btn-toggle-password" class="input-icon-btn" type="button" aria-label="显示密码" title="显示密码"></button>
-          </div>
-          <button id="btn-save-settings" class="btn btn-outline btn-sm" type="button">保存</button>
         </div>
       </div>
       <div class="data-row data-check-row">
@@ -104,16 +143,8 @@
             <span>启动前倒计时</span>
           </label>
           <div class="auto-delay-controls">
-            <input
-              type="number"
-              id="input-auto-delay-minutes"
-              class="data-input auto-delay-input"
-              value="30"
-              min="1"
-              max="1440"
-              step="1"
-              title="启动前倒计时分钟数"
-            />
+            <input type="number" id="input-auto-delay-minutes" class="data-input auto-delay-input" value="30" min="1"
+              max="1440" step="1" title="启动前倒计时分钟数" />
             <span class="data-unit">分钟</span>
           </div>
         </div>
@@ -132,14 +163,18 @@
       <span id="display-status">就绪</span>
     </div>
     <div id="auto-continue-bar" class="auto-continue-bar" style="display:none;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <span class="auto-hint">先自动获取 Duck 邮箱，或手动粘贴邮箱后再继续</span>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span class="auto-hint">先自动获取邮箱，或手动粘贴邮箱后再继续</span>
       <button id="btn-auto-continue" class="btn btn-primary btn-sm">继续</button>
     </div>
     <div id="auto-schedule-bar" class="auto-schedule-bar" style="display:none;">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10"/>
-        <polyline points="12 6 12 12 16 14"/>
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
       </svg>
       <div class="auto-schedule-copy">
         <span id="auto-schedule-title" class="auto-schedule-title">已计划自动运行</span>
@@ -232,4 +267,5 @@
   <div id="toast-container"></div>
   <script src="sidepanel.js"></script>
 </body>
+
 </html>

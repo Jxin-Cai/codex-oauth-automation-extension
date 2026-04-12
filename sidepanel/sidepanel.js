@@ -36,10 +36,15 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const inputVpsPassword = document.getElementById('input-vps-password');
 const selectMailProvider = document.getElementById('select-mail-provider');
+const selectEmailGenerator = document.getElementById('select-email-generator');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
+const rowCfDomain = document.getElementById('row-cf-domain');
+const selectCfDomain = document.getElementById('select-cf-domain');
+const inputCfDomain = document.getElementById('input-cf-domain');
+const btnCfDomainMode = document.getElementById('btn-cf-domain-mode');
 const inputRunCount = document.getElementById('input-run-count');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
 const inputAutoDelayEnabled = document.getElementById('input-auto-delay-enabled');
@@ -79,6 +84,7 @@ let currentAutoRun = {
 let settingsDirty = false;
 let settingsSaveInFlight = false;
 let settingsAutoSaveTimer = null;
+let cloudflareDomainEditMode = false;
 let modalChoiceResolver = null;
 let currentModalActions = [];
 let scheduledCountdownTimer = null;
@@ -367,14 +373,96 @@ function setDefaultAutoRunButton() {
   btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
 }
 
+function normalizeCloudflareDomainValue(value = '') {
+  let normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '';
+  normalized = normalized.replace(/^@+/, '');
+  normalized = normalized.replace(/^https?:\/\//, '');
+  normalized = normalized.replace(/\/.*$/, '');
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(normalized)) {
+    return '';
+  }
+  return normalized;
+}
+
+function normalizeCloudflareDomains(values = []) {
+  const seen = new Set();
+  const domains = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeCloudflareDomainValue(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    domains.push(normalized);
+  }
+  return domains;
+}
+
+function getCloudflareDomainsFromState() {
+  const domains = normalizeCloudflareDomains(latestState?.cloudflareDomains || []);
+  const activeDomain = normalizeCloudflareDomainValue(latestState?.cloudflareDomain || '');
+  if (activeDomain && !domains.includes(activeDomain)) {
+    domains.unshift(activeDomain);
+  }
+  return { domains, activeDomain: activeDomain || domains[0] || '' };
+}
+
+function renderCloudflareDomainOptions(preferredDomain = '') {
+  const preferred = normalizeCloudflareDomainValue(preferredDomain);
+  const { domains, activeDomain } = getCloudflareDomainsFromState();
+  const selected = preferred || activeDomain;
+
+  selectCfDomain.innerHTML = '';
+  if (domains.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '请先添加域名';
+    selectCfDomain.appendChild(option);
+    selectCfDomain.disabled = true;
+    selectCfDomain.value = '';
+    return;
+  }
+
+  for (const domain of domains) {
+    const option = document.createElement('option');
+    option.value = domain;
+    option.textContent = domain;
+    selectCfDomain.appendChild(option);
+  }
+  selectCfDomain.disabled = false;
+  selectCfDomain.value = domains.includes(selected) ? selected : domains[0];
+}
+
+function setCloudflareDomainEditMode(editing, options = {}) {
+  const { clearInput = false } = options;
+  cloudflareDomainEditMode = Boolean(editing);
+  selectCfDomain.style.display = cloudflareDomainEditMode ? 'none' : '';
+  inputCfDomain.style.display = cloudflareDomainEditMode ? '' : 'none';
+  btnCfDomainMode.textContent = cloudflareDomainEditMode ? '保存' : '添加';
+  if (cloudflareDomainEditMode) {
+    if (clearInput) {
+      inputCfDomain.value = '';
+    }
+    inputCfDomain.focus();
+  } else if (clearInput) {
+    inputCfDomain.value = '';
+  }
+}
+
 function collectSettingsPayload() {
+  const { domains, activeDomain } = getCloudflareDomainsFromState();
+  const selectedCloudflareDomain = normalizeCloudflareDomainValue(
+    !cloudflareDomainEditMode ? selectCfDomain.value : activeDomain
+  ) || activeDomain;
   return {
     vpsUrl: inputVpsUrl.value.trim(),
     vpsPassword: inputVpsPassword.value,
     customPassword: inputPassword.value,
     mailProvider: selectMailProvider.value,
+    emailGenerator: selectEmailGenerator.value,
     inbucketHost: inputInbucketHost.value.trim(),
     inbucketMailbox: inputInbucketMailbox.value.trim(),
+    cloudflareDomain: selectedCloudflareDomain,
+    cloudflareDomains: domains,
     autoRunSkipFailures: inputAutoSkipFailures.checked,
     autoRunDelayEnabled: inputAutoDelayEnabled.checked,
     autoRunDelayMinutes: normalizeAutoDelayMinutes(inputAutoDelayMinutes.value),
@@ -551,12 +639,17 @@ async function restoreState() {
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
     }
+    if (state.emailGenerator) {
+      selectEmailGenerator.value = state.emailGenerator;
+    }
     if (state.inbucketHost) {
       inputInbucketHost.value = state.inbucketHost;
     }
     if (state.inbucketMailbox) {
       inputInbucketMailbox.value = state.inbucketMailbox;
     }
+    renderCloudflareDomainOptions(state.cloudflareDomain || '');
+    setCloudflareDomainEditMode(false, { clearInput: true });
     inputAutoSkipFailures.checked = Boolean(state.autoRunSkipFailures);
     inputAutoDelayEnabled.checked = Boolean(state.autoRunDelayEnabled);
     inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(state.autoRunDelayMinutes));
@@ -592,10 +685,78 @@ function syncPasswordField(state) {
   inputPassword.value = state.customPassword || state.password || '';
 }
 
+function getSelectedEmailGenerator() {
+  return selectEmailGenerator.value === 'cloudflare' ? 'cloudflare' : 'duck';
+}
+
+function getEmailGeneratorUiCopy() {
+  if (getSelectedEmailGenerator() === 'cloudflare') {
+    return {
+      buttonLabel: '生成 Cloudflare',
+      placeholder: '点击生成 Cloudflare 邮箱，或手动粘贴邮箱',
+      successVerb: '生成',
+      label: 'Cloudflare 邮箱',
+    };
+  }
+
+  return {
+    buttonLabel: '获取 Duck',
+    placeholder: '点击获取 DuckDuckGo 邮箱，或手动粘贴邮箱',
+    successVerb: '获取',
+    label: 'Duck 邮箱',
+  };
+}
+
 function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
+  const useCloudflare = selectEmailGenerator.value === 'cloudflare';
+  rowCfDomain.style.display = useCloudflare ? '' : 'none';
+  const { domains } = getCloudflareDomainsFromState();
+  if (useCloudflare) {
+    setCloudflareDomainEditMode(cloudflareDomainEditMode || domains.length === 0, { clearInput: false });
+  } else {
+    setCloudflareDomainEditMode(false, { clearInput: false });
+  }
+
+  const uiCopy = getEmailGeneratorUiCopy();
+  inputEmail.placeholder = uiCopy.placeholder;
+  if (!btnFetchEmail.disabled) {
+    btnFetchEmail.textContent = uiCopy.buttonLabel;
+  }
+}
+
+async function saveCloudflareDomainSettings(domains, activeDomain, options = {}) {
+  const { silent = false } = options;
+  const normalizedDomains = normalizeCloudflareDomains(domains);
+  const normalizedActiveDomain = normalizeCloudflareDomainValue(activeDomain) || normalizedDomains[0] || '';
+  const payload = {
+    cloudflareDomain: normalizedActiveDomain,
+    cloudflareDomains: normalizedDomains,
+  };
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload,
+  });
+
+  if (response?.error) {
+    throw new Error(response.error);
+  }
+
+  syncLatestState({
+    ...payload,
+  });
+  renderCloudflareDomainOptions(normalizedActiveDomain);
+  setCloudflareDomainEditMode(false, { clearInput: true });
+  markSettingsDirty(false);
+  updateMailProviderUI();
+
+  if (!silent) {
+    showToast('Cloudflare 域名已保存', 'success', 1800);
+  }
 }
 
 // ============================================================
@@ -773,32 +934,36 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-async function fetchDuckEmail(options = {}) {
+async function fetchGeneratedEmail(options = {}) {
   const { showFailureToast = true } = options;
-  const defaultLabel = '获取';
+  const uiCopy = getEmailGeneratorUiCopy();
+  const defaultLabel = uiCopy.buttonLabel;
   btnFetchEmail.disabled = true;
   btnFetchEmail.textContent = '...';
 
   try {
     const response = await chrome.runtime.sendMessage({
-      type: 'FETCH_DUCK_EMAIL',
+      type: 'FETCH_GENERATED_EMAIL',
       source: 'sidepanel',
-      payload: { generateNew: true },
+      payload: {
+        generateNew: true,
+        generator: selectEmailGenerator.value,
+      },
     });
 
     if (response?.error) {
       throw new Error(response.error);
     }
     if (!response?.email) {
-      throw new Error('未返回 Duck 邮箱。');
+      throw new Error('未返回可用邮箱。');
     }
 
     inputEmail.value = response.email;
-    showToast(`已获取 ${response.email}`, 'success', 2500);
+    showToast(`已${uiCopy.successVerb} ${uiCopy.label}：${response.email}`, 'success', 2500);
     return response.email;
   } catch (err) {
     if (showFailureToast) {
-      showToast(`自动获取失败：${err.message}`, 'error');
+      showToast(`${uiCopy.label}${uiCopy.successVerb}失败：${err.message}`, 'error');
     }
     throw err;
   } finally {
@@ -897,7 +1062,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
         let email = inputEmail.value.trim();
         if (!email) {
           try {
-            email = await fetchDuckEmail({ showFailureToast: false });
+            email = await fetchGeneratedEmail({ showFailureToast: false });
           } catch (err) {
             showToast(`自动获取失败：${err.message}，请手动粘贴邮箱后重试。`, 'warn');
             return;
@@ -920,7 +1085,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  await fetchDuckEmail().catch(() => { });
+  await fetchGeneratedEmail().catch(() => { });
 });
 
 btnTogglePassword.addEventListener('click', () => {
@@ -1000,7 +1165,7 @@ btnAutoRun.addEventListener('click', async () => {
 btnAutoContinue.addEventListener('click', async () => {
   const email = inputEmail.value.trim();
   if (!email) {
-    showToast('请先获取或粘贴 DuckDuckGo 邮箱。', 'warn');
+    showToast('请先获取或粘贴邮箱。', 'warn');
     return;
   }
   autoContinueBar.style.display = 'none';
@@ -1105,6 +1270,48 @@ selectMailProvider.addEventListener('change', () => {
   updateMailProviderUI();
   markSettingsDirty(true);
   saveSettings({ silent: true }).catch(() => { });
+});
+
+selectEmailGenerator.addEventListener('change', () => {
+  updateMailProviderUI();
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+selectCfDomain.addEventListener('change', () => {
+  if (selectCfDomain.disabled) {
+    return;
+  }
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+btnCfDomainMode.addEventListener('click', async () => {
+  try {
+    if (!cloudflareDomainEditMode) {
+      setCloudflareDomainEditMode(true, { clearInput: true });
+      return;
+    }
+
+    const newDomain = normalizeCloudflareDomainValue(inputCfDomain.value);
+    if (!newDomain) {
+      showToast('请输入有效的 Cloudflare 域名。', 'warn');
+      inputCfDomain.focus();
+      return;
+    }
+
+    const { domains } = getCloudflareDomainsFromState();
+    await saveCloudflareDomainSettings([...domains, newDomain], newDomain);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
+
+inputCfDomain.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    btnCfDomainMode.click();
+  }
 });
 
 inputInbucketMailbox.addEventListener('input', () => {

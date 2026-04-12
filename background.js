@@ -25,9 +25,12 @@ const PERSISTED_SETTING_DEFAULTS = {
   autoRunSkipFailures: false, // 自动运行遇到失败步骤后，是否继续执行后续流程。
   autoRunDelayEnabled: false, // 自动运行是否启用启动前倒计时。
   autoRunDelayMinutes: 30, // 自动运行倒计时分钟数。
-  mailProvider: '163', // 验证码邮箱来源，当前支持 163 / inbucket。
+  mailProvider: '163', // 验证码邮箱来源（163 / 163-vip / qq / inbucket）。
+  emailGenerator: 'duck', // 注册邮箱生成方式：duck / cloudflare。
   inbucketHost: '', // 仅当 mailProvider 为 inbucket 时填写 Inbucket 地址，其他情况保持为空。
   inbucketMailbox: '', // 仅当 mailProvider 为 inbucket 时填写邮箱名，其他情况保持为空。
+  cloudflareDomain: '', // 仅当 emailGenerator=cloudflare 时填写自定义域名。
+  cloudflareDomains: [], // Cloudflare 可选域名列表。
 };
 
 const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
@@ -91,6 +94,20 @@ function normalizeScheduledAutoRunPlan(plan) {
   };
 }
 
+function normalizeEmailGenerator(value = '') {
+  return String(value || '').trim().toLowerCase() === 'cloudflare' ? 'cloudflare' : 'duck';
+}
+
+function normalizeCloudflareDomain(rawValue = '') {
+  let value = String(rawValue || '').trim().toLowerCase();
+  if (!value) return '';
+  value = value.replace(/^@+/, '');
+  value = value.replace(/^https?:\/\//, '');
+  value = value.replace(/\/.*$/, '');
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(value)) return '';
+  return value;
+}
+
 async function getPersistedSettings() {
   const stored = await chrome.storage.local.get(PERSISTED_SETTING_KEYS);
   return {
@@ -99,6 +116,7 @@ async function getPersistedSettings() {
     autoRunSkipFailures: Boolean(stored.autoRunSkipFailures ?? PERSISTED_SETTING_DEFAULTS.autoRunSkipFailures),
     autoRunDelayEnabled: Boolean(stored.autoRunDelayEnabled ?? PERSISTED_SETTING_DEFAULTS.autoRunDelayEnabled),
     autoRunDelayMinutes: normalizeAutoRunDelayMinutes(stored.autoRunDelayMinutes ?? PERSISTED_SETTING_DEFAULTS.autoRunDelayMinutes),
+    emailGenerator: normalizeEmailGenerator(stored.emailGenerator ?? PERSISTED_SETTING_DEFAULTS.emailGenerator),
   };
 }
 
@@ -125,7 +143,9 @@ async function initializeSessionStorageAccess() {
 
 async function setState(updates) {
   console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
-  await chrome.storage.session.set(updates);
+  if (Object.keys(updates || {}).length > 0) {
+    await chrome.storage.session.set(updates);
+  }
 }
 
 async function setPersistentSettings(updates) {
@@ -1721,8 +1741,13 @@ async function handleMessage(message, sender) {
       if (message.payload.autoRunDelayEnabled !== undefined) updates.autoRunDelayEnabled = Boolean(message.payload.autoRunDelayEnabled);
       if (message.payload.autoRunDelayMinutes !== undefined) updates.autoRunDelayMinutes = normalizeAutoRunDelayMinutes(message.payload.autoRunDelayMinutes);
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
+      if (message.payload.emailGenerator !== undefined) updates.emailGenerator = normalizeEmailGenerator(message.payload.emailGenerator);
       if (message.payload.inbucketHost !== undefined) updates.inbucketHost = message.payload.inbucketHost;
       if (message.payload.inbucketMailbox !== undefined) updates.inbucketMailbox = message.payload.inbucketMailbox;
+      if (message.payload.cloudflareDomain !== undefined) updates.cloudflareDomain = normalizeCloudflareDomain(message.payload.cloudflareDomain);
+      if (message.payload.cloudflareDomains !== undefined) updates.cloudflareDomains = Array.isArray(message.payload.cloudflareDomains)
+        ? message.payload.cloudflareDomains.map(domain => normalizeCloudflareDomain(domain)).filter(Boolean)
+        : [];
       await setPersistentSettings(updates);
       await setState(updates);
       return { ok: true };
@@ -1739,13 +1764,24 @@ async function handleMessage(message, sender) {
       return { ok: true, email: message.payload.email };
     }
 
+    case 'FETCH_GENERATED_EMAIL': {
+      clearStopRequest();
+      const state = await getState();
+      if (isAutoRunLockedState(state)) {
+        throw new Error('自动流程运行中，当前不能手动获取邮箱。');
+      }
+      const email = await fetchGeneratedEmail(state, message.payload || {});
+      await resumeAutoRun();
+      return { ok: true, email };
+    }
+
     case 'FETCH_DUCK_EMAIL': {
       clearStopRequest();
       const state = await getState();
       if (isAutoRunLockedState(state)) {
-        throw new Error('自动流程运行中，当前不能手动获取 Duck 邮箱。');
+        throw new Error('自动流程运行中，当前不能手动获取邮箱。');
       }
-      const email = await fetchDuckEmail(message.payload || {});
+      const email = await fetchGeneratedEmail(state, { ...(message.payload || {}), generator: 'duck' });
       await resumeAutoRun();
       return { ok: true, email };
     }
@@ -1991,6 +2027,40 @@ async function executeStepAndWait(step, delayAfter = 2000) {
   }
 }
 
+function getEmailGeneratorLabel(generator) {
+  return generator === 'cloudflare' ? 'Cloudflare 邮箱' : 'Duck 邮箱';
+}
+
+function generateCloudflareAliasLocalPart() {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join('');
+  const randomPart = String(Math.floor(Math.random() * 900) + 100);
+  return `user${stamp}${randomPart}`.toLowerCase();
+}
+
+async function fetchCloudflareEmail(state, options = {}) {
+  throwIfStopped();
+  const latestState = state || await getState();
+  const domain = normalizeCloudflareDomain(latestState.cloudflareDomain);
+  if (!domain) {
+    throw new Error('Cloudflare 域名为空或格式无效。');
+  }
+
+  const localPart = String(options.localPart || '').trim().toLowerCase() || generateCloudflareAliasLocalPart();
+  const aliasEmail = `${localPart}@${domain}`;
+
+  await setEmailState(aliasEmail);
+  await addLog(`Cloudflare 邮箱：已生成 ${aliasEmail}`, 'ok');
+  return aliasEmail;
+}
+
 async function fetchDuckEmail(options = {}) {
   throwIfStopped();
   const { generateNew = true } = options;
@@ -2016,6 +2086,15 @@ async function fetchDuckEmail(options = {}) {
   return result.email;
 }
 
+async function fetchGeneratedEmail(state, options = {}) {
+  const currentState = state || await getState();
+  const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
+  if (generator === 'cloudflare') {
+    return fetchCloudflareEmail(currentState, options);
+  }
+  return fetchDuckEmail(options);
+}
+
 // ============================================================
 // Auto Run Flow
 // ============================================================
@@ -2024,7 +2103,7 @@ let autoRunActive = false;
 let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
 let autoRunAttemptRun = 0;
-const DUCK_EMAIL_MAX_ATTEMPTS = 5;
+const EMAIL_FETCH_MAX_ATTEMPTS = 5;
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
 const AUTO_STEP_DELAYS = {
   1: 2000,
@@ -2063,23 +2142,31 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
     return currentState.email;
   }
 
-  let lastDuckError = null;
-  for (let duckAttempt = 1; duckAttempt <= DUCK_EMAIL_MAX_ATTEMPTS; duckAttempt++) {
+  const generator = normalizeEmailGenerator(currentState.emailGenerator);
+  const generatorLabel = getEmailGeneratorLabel(generator);
+  let lastError = null;
+  for (let attempt = 1; attempt <= EMAIL_FETCH_MAX_ATTEMPTS; attempt++) {
     try {
-      if (duckAttempt > 1) {
-        await addLog(`Duck 邮箱：正在进行第 ${duckAttempt}/${DUCK_EMAIL_MAX_ATTEMPTS} 次自动获取重试...`, 'warn');
+      if (attempt > 1) {
+        await addLog(`${generatorLabel}：正在进行第 ${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS} 次自动获取重试...`, 'warn');
       }
-      const duckEmail = await fetchDuckEmail({ generateNew: true });
-      await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：Duck 邮箱已就绪：${duckEmail}（第 ${attemptRuns} 次尝试，Duck 第 ${duckAttempt}/${DUCK_EMAIL_MAX_ATTEMPTS} 次获取）===`, 'ok');
-      return duckEmail;
+      const generatedEmail = await fetchGeneratedEmail(currentState, { generateNew: true, generator });
+      await addLog(
+        `=== 目标 ${targetRun}/${totalRuns} 轮：${generatorLabel}已就绪：${generatedEmail}（第 ${attemptRuns} 次尝试，第 ${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS} 次获取）===`,
+        'ok'
+      );
+      return generatedEmail;
     } catch (err) {
-      lastDuckError = err;
-      await addLog(`Duck 邮箱自动获取失败（${duckAttempt}/${DUCK_EMAIL_MAX_ATTEMPTS}）：${err.message}`, 'warn');
+      lastError = err;
+      await addLog(`${generatorLabel}自动获取失败（${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS}）：${err.message}`, 'warn');
+      if (generator === 'cloudflare' && /域名/.test(String(err.message || ''))) {
+        break;
+      }
     }
   }
 
-  await addLog(`Duck 邮箱自动获取已连续失败 ${DUCK_EMAIL_MAX_ATTEMPTS} 次：${lastDuckError?.message || '未知错误'}`, 'error');
-  await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮已暂停：请先获取 Duck 邮箱或手动粘贴邮箱，然后继续 ===`, 'warn');
+  await addLog(`${generatorLabel}自动获取已连续失败 ${EMAIL_FETCH_MAX_ATTEMPTS} 次：${lastError?.message || '未知错误'}`, 'error');
+  await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮已暂停：请先自动获取邮箱或手动粘贴邮箱，然后继续 ===`, 'warn');
   await broadcastAutoRunStatus('waiting_email', {
     currentRun: targetRun,
     totalRuns,
@@ -2215,9 +2302,14 @@ async function autoRunLoop(totalRuns, options = {}) {
         vpsPassword: prevState.vpsPassword,
         customPassword: prevState.customPassword,
         autoRunSkipFailures: prevState.autoRunSkipFailures,
+        autoRunDelayEnabled: prevState.autoRunDelayEnabled,
+        autoRunDelayMinutes: prevState.autoRunDelayMinutes,
         mailProvider: prevState.mailProvider,
+        emailGenerator: prevState.emailGenerator,
         inbucketHost: prevState.inbucketHost,
         inbucketMailbox: prevState.inbucketMailbox,
+        cloudflareDomain: prevState.cloudflareDomain,
+        cloudflareDomains: prevState.cloudflareDomains,
         ...getAutoRunStatusPayload('running', { currentRun: targetRun, totalRuns, attemptRun: attemptRuns }),
         ...(forceFreshTabsNextRun ? { tabRegistry: {} } : {}),
       };

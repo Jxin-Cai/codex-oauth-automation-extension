@@ -440,6 +440,9 @@ test('resetState preserves LuckMail session config, used map, and preserve tag c
     'async function getPersistedSettings() {',
     "  return { mailProvider: '163' };",
     '}',
+    'async function getPersistedAliasState() {',
+    '  return {};',
+    '}',
     'const chrome = {',
     '  storage: {',
     '    session: {',
@@ -545,6 +548,7 @@ function broadcastDataUpdate() {}
 function isLocalhostOAuthCallbackUrl() {
   return true;
 }
+async function finalizeIcloudAliasAfterSuccessfulFlow() {}
 
 ${bundle}
 

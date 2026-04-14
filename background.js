@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'hotmail-utils.js', 'luckmail-utils.js', 'content/activation-utils.js');
+importScripts('data/names.js', 'hotmail-utils.js', 'luckmail-utils.js', 'cloudflare-temp-email-utils.js', 'icloud-utils.js', 'content/activation-utils.js');
 
 const {
   buildHotmailMailApiLatestUrl,
@@ -45,13 +45,46 @@ const {
   pickLuckmailVerificationMail,
 } = self.LuckMailUtils;
 const {
+  DEFAULT_MAIL_PAGE_SIZE: CLOUDFLARE_TEMP_EMAIL_DEFAULT_PAGE_SIZE,
+  buildCloudflareTempEmailHeaders,
+  getCloudflareTempEmailAddressFromResponse,
+  joinCloudflareTempEmailUrl,
+  normalizeCloudflareTempEmailAddress,
+  normalizeCloudflareTempEmailBaseUrl,
+  normalizeCloudflareTempEmailDomain,
+  normalizeCloudflareTempEmailDomains,
+  normalizeCloudflareTempEmailMailApiMessages,
+} = self.CloudflareTempEmailUtils;
+const {
+  findIcloudAliasByEmail,
+  getConfiguredIcloudHostPreference,
+  getIcloudHostHintFromMessage,
+  getIcloudLoginUrlForHost,
+  getIcloudSetupUrlForHost,
+  normalizeBooleanMap,
+  normalizeIcloudAliasList,
+  normalizeIcloudHost,
+  pickReusableIcloudAlias,
+  toNormalizedEmailSet,
+} = self.IcloudUtils;
+const {
   isRecoverableStep9AuthFailure,
 } = self.MultiPageActivationUtils;
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
+const ICLOUD_SETUP_URLS = [
+  'https://setup.icloud.com.cn/setup/ws/1',
+  'https://setup.icloud.com/setup/ws/1',
+];
+const ICLOUD_LOGIN_URLS = [
+  'https://www.icloud.com.cn/',
+  'https://www.icloud.com/',
+];
 const HOTMAIL_PROVIDER = 'hotmail-api';
 const LUCKMAIL_PROVIDER = 'luckmail-api';
+const CLOUDFLARE_TEMP_EMAIL_PROVIDER = 'cloudflare-temp-email';
+const CLOUDFLARE_TEMP_EMAIL_GENERATOR = 'cloudflare-temp-email';
 const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
@@ -78,6 +111,7 @@ const DEFAULT_HOTMAIL_LOCAL_BASE_URL = 'http://127.0.0.1:17373';
 const HOTMAIL_LOCAL_HELPER_TIMEOUT_MS = 45000;
 const DEFAULT_LUCKMAIL_PROJECT_CODE = 'openai';
 const DISPLAY_TIMEZONE = 'Asia/Shanghai';
+const PERSISTENT_ALIAS_STATE_KEYS = ['manualAliasUsage', 'preservedAliases'];
 
 initializeSessionStorageAccess();
 
@@ -102,6 +136,8 @@ const PERSISTED_SETTING_DEFAULTS = {
   autoStepDelaySeconds: null,
   mailProvider: '163',
   emailGenerator: 'duck',
+  autoDeleteUsedIcloudAlias: false,
+  icloudHostPreference: 'auto',
   emailPrefix: '',
   inbucketHost: '',
   inbucketMailbox: '',
@@ -110,6 +146,11 @@ const PERSISTED_SETTING_DEFAULTS = {
   hotmailLocalBaseUrl: DEFAULT_HOTMAIL_LOCAL_BASE_URL,
   cloudflareDomain: '',
   cloudflareDomains: [],
+  cloudflareTempEmailBaseUrl: '',
+  cloudflareTempEmailAdminAuth: '',
+  cloudflareTempEmailCustomAuth: '',
+  cloudflareTempEmailDomain: '',
+  cloudflareTempEmailDomains: [],
   hotmailAccounts: [],
 };
 
@@ -127,6 +168,8 @@ const DEFAULT_STATE = {
   email: null, // 运行时邮箱，由程序自动获取并写入，不能手动预填。
   password: null, // 运行时实际密码，由 customPassword 或程序自动生成后写入。
   accounts: [], // 已生成账号记录：{ email, password, createdAt }。
+  manualAliasUsage: {},
+  preservedAliases: {},
   lastEmailTimestamp: null, // 最近一次获取到邮箱数据的运行时时间戳。
   lastSignupCode: null, // 注册验证码，运行时由程序自动读取并写入。
   lastLoginCode: null, // 登录验证码，运行时由程序自动读取并写入。
@@ -163,6 +206,7 @@ const DEFAULT_STATE = {
   signupVerificationRequestedAt: null,
   loginVerificationRequestedAt: null,
   currentHotmailAccountId: null,
+  preferredIcloudHost: '',
 };
 
 function normalizeAutoRunDelayMinutes(value) {
@@ -256,9 +300,11 @@ function normalizeEmailGenerator(value = '') {
   if (normalized === 'custom' || normalized === 'manual') {
     return 'custom';
   }
-  if (normalized === 'cloudflare') {
-    return 'cloudflare';
+  if (normalized === 'icloud') {
+    return 'icloud';
   }
+  if (normalized === 'cloudflare') return 'cloudflare';
+  if (normalized === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return CLOUDFLARE_TEMP_EMAIL_GENERATOR;
   return 'duck';
 }
 
@@ -272,6 +318,7 @@ function normalizeMailProvider(value = '') {
     case 'custom':
     case HOTMAIL_PROVIDER:
     case LUCKMAIL_PROVIDER:
+    case CLOUDFLARE_TEMP_EMAIL_PROVIDER:
     case '163':
     case '163-vip':
     case 'qq':
@@ -411,6 +458,16 @@ function getHotmailServiceSettings(state = {}) {
   };
 }
 
+function getCloudflareTempEmailConfig(state = {}) {
+  return {
+    baseUrl: normalizeCloudflareTempEmailBaseUrl(state.cloudflareTempEmailBaseUrl),
+    adminAuth: String(state.cloudflareTempEmailAdminAuth || ''),
+    customAuth: String(state.cloudflareTempEmailCustomAuth || ''),
+    domain: normalizeCloudflareTempEmailDomain(state.cloudflareTempEmailDomain),
+    domains: normalizeCloudflareTempEmailDomains(state.cloudflareTempEmailDomains),
+  };
+}
+
 function normalizePersistentSettingValue(key, value) {
   switch (key) {
     case 'panelMode':
@@ -444,6 +501,10 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeMailProvider(value);
     case 'emailGenerator':
       return normalizeEmailGenerator(value);
+    case 'autoDeleteUsedIcloudAlias':
+      return Boolean(value);
+    case 'icloudHostPreference':
+      return normalizeIcloudHost(value) || 'auto';
     case 'emailPrefix':
       return String(value || '').trim();
     case 'inbucketHost':
@@ -460,6 +521,15 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeCloudflareDomain(value);
     case 'cloudflareDomains':
       return normalizeCloudflareDomains(value);
+    case 'cloudflareTempEmailBaseUrl':
+      return normalizeCloudflareTempEmailBaseUrl(value);
+    case 'cloudflareTempEmailAdminAuth':
+    case 'cloudflareTempEmailCustomAuth':
+      return String(value || '');
+    case 'cloudflareTempEmailDomain':
+      return normalizeCloudflareTempEmailDomain(value);
+    case 'cloudflareTempEmailDomains':
+      return normalizeCloudflareTempEmailDomains(value);
     case 'hotmailAccounts':
       return normalizeHotmailAccounts(value);
     default:
@@ -503,6 +573,13 @@ function buildPersistentSettingsPayload(input = {}, options = {}) {
     }
     payload.cloudflareDomains = domains;
   }
+  if (payload.cloudflareTempEmailDomains) {
+    const domains = normalizeCloudflareTempEmailDomains(payload.cloudflareTempEmailDomains);
+    if (payload.cloudflareTempEmailDomain && !domains.includes(payload.cloudflareTempEmailDomain)) {
+      domains.unshift(payload.cloudflareTempEmailDomain);
+    }
+    payload.cloudflareTempEmailDomains = domains;
+  }
 
   return payload;
 }
@@ -512,12 +589,29 @@ async function getPersistedSettings() {
   return buildPersistentSettingsPayload(stored, { fillDefaults: true });
 }
 
+async function getPersistedAliasState() {
+  try {
+    const stored = await chrome.storage.local.get(PERSISTENT_ALIAS_STATE_KEYS);
+    return {
+      manualAliasUsage: normalizeBooleanMap(stored.manualAliasUsage),
+      preservedAliases: normalizeBooleanMap(stored.preservedAliases),
+    };
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to read persisted iCloud alias state:', err?.message || err);
+    return {
+      manualAliasUsage: {},
+      preservedAliases: {},
+    };
+  }
+}
+
 async function getState() {
-  const [state, persistedSettings] = await Promise.all([
+  const [state, persistedSettings, persistedAliasState] = await Promise.all([
     chrome.storage.session.get(null),
     getPersistedSettings(),
+    getPersistedAliasState(),
   ]);
-  return { ...DEFAULT_STATE, ...persistedSettings, ...state };
+  return { ...DEFAULT_STATE, ...persistedSettings, ...persistedAliasState, ...state };
 }
 
 async function initializeSessionStorageAccess() {
@@ -537,6 +631,16 @@ async function setState(updates) {
   console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
   if (Object.keys(updates || {}).length > 0) {
     await chrome.storage.session.set(updates);
+    const persistentAliasUpdates = {};
+    if (Object.prototype.hasOwnProperty.call(updates, 'manualAliasUsage')) {
+      persistentAliasUpdates.manualAliasUsage = normalizeBooleanMap(updates.manualAliasUsage);
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'preservedAliases')) {
+      persistentAliasUpdates.preservedAliases = normalizeBooleanMap(updates.preservedAliases);
+    }
+    if (Object.keys(persistentAliasUpdates).length > 0) {
+      await chrome.storage.local.set(persistentAliasUpdates);
+    }
   }
 }
 
@@ -611,6 +715,13 @@ async function importSettingsBundle(configBundle) {
 function broadcastDataUpdate(payload) {
   chrome.runtime.sendMessage({
     type: 'DATA_UPDATED',
+    payload,
+  }).catch(() => { });
+}
+
+function broadcastIcloudAliasesChanged(payload = {}) {
+  chrome.runtime.sendMessage({
+    type: 'ICLOUD_ALIASES_CHANGED',
     payload,
   }).catch(() => { });
 }
@@ -712,10 +823,62 @@ async function clearLuckmailRuntimeState(options = {}) {
   broadcastDataUpdate(updates);
 }
 
+function getManualAliasUsageMap(state) {
+  return normalizeBooleanMap(state?.manualAliasUsage);
+}
+
+function getPreservedAliasMap(state) {
+  return normalizeBooleanMap(state?.preservedAliases);
+}
+
+function isAliasPreserved(state, email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return false;
+  return Boolean(getPreservedAliasMap(state)[normalizedEmail]);
+}
+
+function getEffectiveUsedEmails(state) {
+  return toNormalizedEmailSet(getManualAliasUsageMap(state));
+}
+
+async function setIcloudAliasUsedState(payload = {}, options = {}) {
+  const email = String(payload.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('未提供 iCloud 隐私邮箱地址。');
+  }
+
+  const used = Boolean(payload.used);
+  const state = await getState();
+  const manualAliasUsage = getManualAliasUsageMap(state);
+  manualAliasUsage[email] = used;
+  await setState({ manualAliasUsage });
+  if (!options.silentLog) {
+    await addLog(`iCloud：已将 ${email} 标记为${used ? '已用' : '未用'}`, 'ok');
+  }
+  broadcastIcloudAliasesChanged({ reason: 'used-updated', email, used });
+  return { email, used };
+}
+
+async function setIcloudAliasPreservedState(payload = {}) {
+  const email = String(payload.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('未提供 iCloud 隐私邮箱地址。');
+  }
+
+  const preserved = Boolean(payload.preserved);
+  const state = await getState();
+  const preservedAliases = getPreservedAliasMap(state);
+  preservedAliases[email] = preserved;
+  await setState({ preservedAliases });
+  await addLog(`iCloud：已将 ${email} ${preserved ? '设为保留' : '取消保留'}`, 'ok');
+  broadcastIcloudAliasesChanged({ reason: 'preserved-updated', email, preserved });
+  return { email, preserved };
+}
+
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
-  const [prev, persistedSettings] = await Promise.all([
+  const [prev, persistedSettings, persistedAliasState] = await Promise.all([
     chrome.storage.session.get([
       'seenCodes',
       'seenInbucketMailIds',
@@ -729,13 +892,16 @@ async function resetState() {
       'luckmailUsedPurchases',
       'luckmailPreserveTagId',
       'luckmailPreserveTagName',
+      'preferredIcloudHost',
     ]),
     getPersistedSettings(),
+    getPersistedAliasState(),
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
     ...persistedSettings,
+    ...persistedAliasState,
     seenCodes: prev.seenCodes || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
@@ -750,6 +916,7 @@ async function resetState() {
     luckmailPreserveTagName: String(prev.luckmailPreserveTagName || '').trim() || DEFAULT_LUCKMAIL_PRESERVE_TAG_NAME,
     currentLuckmailPurchase: null,
     currentLuckmailMailCursor: null,
+    preferredIcloudHost: prev.preferredIcloudHost || '',
   });
 }
 
@@ -2183,6 +2350,522 @@ async function pollLuckmailVerificationCode(step, state, pollPayload = {}) {
   throw lastError || new Error(`步骤 ${step}：未在 LuckMail 邮箱中找到新的匹配验证码。`);
 }
 
+function summarizeCloudflareTempEmailMessagesForLog(messages) {
+  return (messages || [])
+    .slice()
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.receivedDateTime || '') || 0;
+      const rightTime = Date.parse(right.receivedDateTime || '') || 0;
+      return rightTime - leftTime;
+    })
+    .slice(0, 3)
+    .map((message) => {
+      const receivedAt = message?.receivedDateTime || '未知时间';
+      const sender = message?.from?.emailAddress?.address || '未知发件人';
+      const subject = message?.subject || '（无主题）';
+      const preview = String(message?.bodyPreview || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      const address = message?.address || '未知地址';
+      return `[${address}] ${receivedAt} | ${sender} | ${subject} | ${preview}`;
+    })
+    .join(' || ');
+}
+
+async function deleteCloudflareTempEmailMail(config, mailId) {
+  const normalizedMailId = String(mailId || '').trim();
+  if (!normalizedMailId) return false;
+
+  await requestCloudflareTempEmailJson(config, `/admin/mails/${encodeURIComponent(normalizedMailId)}`, {
+    method: 'DELETE',
+  });
+  return true;
+}
+
+async function listCloudflareTempEmailMessages(state, options = {}) {
+  const config = ensureCloudflareTempEmailConfig(state, { requireAdminAuth: true });
+  const address = normalizeCloudflareTempEmailAddress(options.address);
+  const payload = await requestCloudflareTempEmailJson(config, '/admin/mails', {
+    method: 'GET',
+    searchParams: {
+      limit: Number(options.limit) || CLOUDFLARE_TEMP_EMAIL_DEFAULT_PAGE_SIZE,
+      offset: Number(options.offset) || 0,
+      address,
+    },
+  });
+
+  const messages = normalizeCloudflareTempEmailMailApiMessages(payload).filter((message) => {
+    if (!address) return true;
+    return !message.address || normalizeCloudflareTempEmailAddress(message.address) === address;
+  });
+
+  return { config, messages };
+}
+
+async function pollCloudflareTempEmailVerificationCode(step, state, pollPayload = {}) {
+  const targetEmail = normalizeCloudflareTempEmailAddress(pollPayload.targetEmail || state.email);
+  if (!targetEmail) {
+    throw new Error('Cloudflare Temp Email 轮询前缺少目标邮箱地址。');
+  }
+
+  await addLog(`步骤 ${step}：正在轮询 Cloudflare Temp Email 邮件（${targetEmail}）...`, 'info');
+  const maxAttempts = Number(pollPayload.maxAttempts) || 5;
+  const intervalMs = Number(pollPayload.intervalMs) || 3000;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfStopped();
+    try {
+      const { config, messages } = await listCloudflareTempEmailMessages(state, {
+        address: targetEmail,
+        limit: pollPayload.limit || CLOUDFLARE_TEMP_EMAIL_DEFAULT_PAGE_SIZE,
+        offset: pollPayload.offset || 0,
+      });
+      const matchResult = pickVerificationMessageWithTimeFallback(messages, {
+        afterTimestamp: pollPayload.filterAfterTimestamp || 0,
+        senderFilters: pollPayload.senderFilters || [],
+        subjectFilters: pollPayload.subjectFilters || [],
+        excludeCodes: pollPayload.excludeCodes || [],
+      });
+      const match = matchResult.match;
+
+      if (match?.code) {
+        if (matchResult.usedRelaxedFilters) {
+          const fallbackLabel = matchResult.usedTimeFallback ? '宽松匹配 + 时间回退' : '宽松匹配';
+          await addLog(`步骤 ${step}：严格规则未命中，已改用 ${fallbackLabel} 并命中 Cloudflare Temp Email 验证码。`, 'warn');
+        }
+        try {
+          await deleteCloudflareTempEmailMail(config, match.message?.id);
+        } catch (err) {
+          await addLog(`步骤 ${step}：删除 Cloudflare Temp Email 邮件失败：${err.message}`, 'warn');
+        }
+        return {
+          ok: true,
+          code: match.code,
+          emailTimestamp: match.receivedAt || Date.now(),
+          mailId: match.message?.id || '',
+        };
+      }
+
+      lastError = new Error(`步骤 ${step}：暂未在 Cloudflare Temp Email 中找到匹配验证码（${attempt}/${maxAttempts}）。`);
+      await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
+      const sample = summarizeCloudflareTempEmailMessagesForLog(messages);
+      if (sample) {
+        await addLog(`步骤 ${step}：最近邮件样本：${sample}`, 'info');
+      }
+    } catch (err) {
+      lastError = err;
+      await addLog(`步骤 ${step}：Cloudflare Temp Email 轮询失败：${err.message}`, 'warn');
+    }
+
+    if (attempt < maxAttempts) {
+      await sleepWithStop(intervalMs);
+    }
+  }
+
+  throw lastError || new Error(`步骤 ${step}：未在 Cloudflare Temp Email 中找到新的匹配验证码。`);
+}
+
+async function getOpenIcloudHostPreference() {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: [
+        'https://www.icloud.com/*',
+        'https://www.icloud.com.cn/*',
+      ],
+    });
+
+    const activeTab = tabs.find((tab) => tab.active);
+    const candidates = activeTab ? [activeTab, ...tabs.filter((tab) => tab.id !== activeTab.id)] : tabs;
+    for (const tab of candidates) {
+      try {
+        const host = normalizeIcloudHost(new URL(tab.url).host);
+        if (host) return host;
+      } catch {}
+    }
+  } catch {}
+
+  return '';
+}
+
+async function getPreferredIcloudLoginUrl(error = null, state = null) {
+  const currentState = state || await getState();
+  const configuredHost = getConfiguredIcloudHostPreference(currentState);
+  if (configuredHost) {
+    return getIcloudLoginUrlForHost(configuredHost);
+  }
+
+  const messageHint = getIcloudHostHintFromMessage(getErrorMessage(error));
+  if (messageHint) {
+    return getIcloudLoginUrlForHost(messageHint);
+  }
+
+  const savedHost = normalizeIcloudHost(currentState?.preferredIcloudHost);
+  if (savedHost) {
+    return getIcloudLoginUrlForHost(savedHost);
+  }
+
+  const openHost = await getOpenIcloudHostPreference();
+  if (openHost) {
+    return getIcloudLoginUrlForHost(openHost);
+  }
+
+  return ICLOUD_LOGIN_URLS[0];
+}
+
+async function getPreferredIcloudSetupUrls(state = null, error = null) {
+  const preferredLoginUrl = await getPreferredIcloudLoginUrl(error, state);
+  const preferredHost = normalizeIcloudHost(new URL(preferredLoginUrl).host);
+  const preferredSetupUrl = getIcloudSetupUrlForHost(preferredHost);
+  if (!preferredSetupUrl) {
+    return [...ICLOUD_SETUP_URLS];
+  }
+  return [
+    preferredSetupUrl,
+    ...ICLOUD_SETUP_URLS.filter((url) => url !== preferredSetupUrl),
+  ];
+}
+
+function isIcloudLoginRequiredError(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('could not validate icloud session')
+    || message.includes('hide my email service was unavailable')
+    || /\bstatus (401|403|409|421)\b/.test(message);
+}
+
+let lastIcloudLoginPromptAt = 0;
+
+async function openIcloudLoginPage(preferredUrl) {
+  const tabs = await chrome.tabs.query({
+    url: [
+      'https://www.icloud.com/*',
+      'https://www.icloud.com.cn/*',
+    ],
+  });
+  const preferredHost = new URL(preferredUrl).host;
+  const existing = tabs.find((tab) => {
+    try {
+      return new URL(tab.url).host === preferredHost;
+    } catch {
+      return false;
+    }
+  });
+
+  if (existing?.id) {
+    await chrome.tabs.update(existing.id, { active: true });
+    if (existing.url !== preferredUrl) {
+      await chrome.tabs.update(existing.id, { url: preferredUrl });
+    }
+    return existing.id;
+  }
+
+  const created = await chrome.tabs.create({ url: preferredUrl, active: true });
+  return created.id;
+}
+
+async function promptIcloudLogin(error, actionLabel = 'iCloud 操作') {
+  const now = Date.now();
+  const preferredUrl = await getPreferredIcloudLoginUrl(error);
+  const originalError = getErrorMessage(error);
+
+  chrome.runtime.sendMessage({
+    type: 'ICLOUD_LOGIN_REQUIRED',
+    payload: {
+      actionLabel,
+      loginUrl: preferredUrl,
+      message: '需要先登录 iCloud，我已经为你打开登录页。',
+      detail: originalError,
+    },
+  }).catch(() => { });
+
+  if (now - lastIcloudLoginPromptAt < 15000) {
+    return;
+  }
+  lastIcloudLoginPromptAt = now;
+
+  await addLog(`iCloud：${actionLabel}时需要登录，正在打开 ${new URL(preferredUrl).host} ...`, 'warn');
+
+  try {
+    await openIcloudLoginPage(preferredUrl);
+  } catch (tabErr) {
+    await addLog(`iCloud：自动打开登录页失败：${getErrorMessage(tabErr)}`, 'warn');
+  }
+}
+
+async function withIcloudLoginHelp(actionLabel, action) {
+  try {
+    return await action();
+  } catch (err) {
+    if (isIcloudLoginRequiredError(err)) {
+      await promptIcloudLogin(err, actionLabel);
+      throw new Error('请先在新打开的 iCloud 页面中完成登录，再回来点击“我已登录”。');
+    }
+    throw err;
+  }
+}
+
+async function icloudRequest(method, url, options = {}) {
+  const { data } = options;
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      credentials: 'include',
+      headers: data !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: data !== undefined ? JSON.stringify(data) : undefined,
+    });
+  } catch (err) {
+    throw new Error(`iCloud 请求失败：${method} ${url}，${err.message}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`iCloud 请求失败：${method} ${url}，status ${response.status}`);
+  }
+
+  try {
+    return await response.json();
+  } catch (err) {
+    throw new Error(`iCloud 返回的 JSON 无法解析：${method} ${url}，${err.message}`);
+  }
+}
+
+async function validateIcloudSession(setupUrl) {
+  const data = await icloudRequest('POST', `${setupUrl}/validate`);
+  if (!data?.webservices?.premiummailsettings?.url) {
+    throw new Error('Could not validate iCloud session. Hide My Email service was unavailable.');
+  }
+  return data;
+}
+
+async function resolveIcloudPremiumMailService() {
+  const errors = [];
+  const state = await getState();
+  const setupUrls = await getPreferredIcloudSetupUrls(state);
+
+  for (const setupUrl of setupUrls) {
+    try {
+      const data = await validateIcloudSession(setupUrl);
+      const preferredIcloudHost = normalizeIcloudHost(new URL(setupUrl).host);
+      if (preferredIcloudHost && preferredIcloudHost !== normalizeIcloudHost(state.preferredIcloudHost)) {
+        await setState({ preferredIcloudHost });
+      }
+      return {
+        setupUrl,
+        serviceUrl: String(data.webservices.premiummailsettings.url || '').replace(/\/$/, ''),
+      };
+    } catch (err) {
+      errors.push(`${new URL(setupUrl).host}: ${getErrorMessage(err)}`);
+    }
+  }
+
+  throw new Error(errors.length
+    ? `Could not validate iCloud session. ${errors.join(' | ')}`
+    : 'Could not validate iCloud session. 请先在当前浏览器登录 icloud.com.cn 或 icloud.com。');
+}
+
+function getIcloudAliasLabel() {
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return `MultiPage ${dateStr}`;
+}
+
+async function checkIcloudSession() {
+  return withIcloudLoginHelp('检查 iCloud 会话', async () => {
+    const { setupUrl } = await resolveIcloudPremiumMailService();
+    await addLog(`iCloud：会话校验通过（${new URL(setupUrl).host}）`, 'ok');
+    return { ok: true, setupUrl };
+  });
+}
+
+async function listIcloudAliases() {
+  return withIcloudLoginHelp('加载 iCloud 隐私邮箱列表', async () => {
+    const { serviceUrl } = await resolveIcloudPremiumMailService();
+    const response = await icloudRequest('GET', `${serviceUrl}/v2/hme/list`);
+    const state = await getState();
+    return normalizeIcloudAliasList(response, {
+      usedEmails: getEffectiveUsedEmails(state),
+      preservedEmails: getPreservedAliasMap(state),
+    });
+  });
+}
+
+async function deleteIcloudAlias(payload) {
+  return withIcloudLoginHelp('删除 iCloud 隐私邮箱', async () => {
+    const alias = typeof payload === 'string'
+      ? { email: String(payload).trim().toLowerCase(), anonymousId: '' }
+      : {
+          email: String(payload?.email || '').trim().toLowerCase(),
+          anonymousId: String(payload?.anonymousId || '').trim(),
+        };
+
+    if (!alias.email) {
+      throw new Error('未提供需要删除的 iCloud 隐私邮箱。');
+    }
+    if (!alias.anonymousId) {
+      throw new Error(`缺少 ${alias.email} 的 anonymousId，请先刷新 iCloud 别名列表。`);
+    }
+
+    const { serviceUrl } = await resolveIcloudPremiumMailService();
+
+    try {
+      const directDelete = await icloudRequest('POST', `${serviceUrl}/v1/hme/delete`, {
+        data: { anonymousId: alias.anonymousId },
+      });
+      if (directDelete?.success === false) {
+        throw new Error(directDelete?.error?.errorMessage || 'delete failed');
+      }
+    } catch (err) {
+      await addLog(`iCloud：直接删除 ${alias.email} 失败，尝试先停用再删除...`, 'warn');
+
+      const deactivated = await icloudRequest('POST', `${serviceUrl}/v1/hme/deactivate`, {
+        data: { anonymousId: alias.anonymousId },
+      });
+      if (deactivated?.success === false) {
+        throw new Error(deactivated?.error?.errorMessage || `停用 ${alias.email} 失败`);
+      }
+
+      const deleted = await icloudRequest('POST', `${serviceUrl}/v1/hme/delete`, {
+        data: { anonymousId: alias.anonymousId },
+      });
+      if (deleted?.success === false) {
+        throw new Error(deleted?.error?.errorMessage || `删除 ${alias.email} 失败`);
+      }
+    }
+
+    const state = await getState();
+    const manualAliasUsage = getManualAliasUsageMap(state);
+    const preservedAliases = getPreservedAliasMap(state);
+    delete manualAliasUsage[alias.email];
+    delete preservedAliases[alias.email];
+    await setState({ manualAliasUsage, preservedAliases });
+
+    await addLog(`iCloud：已删除 ${alias.email}`, 'ok');
+    broadcastIcloudAliasesChanged({ reason: 'deleted', email: alias.email });
+    return { email: alias.email };
+  });
+}
+
+async function deleteUsedIcloudAliases() {
+  const aliases = await listIcloudAliases();
+  const usedAliases = aliases.filter((alias) => alias.used);
+  if (!usedAliases.length) {
+    return { deleted: [], skipped: [] };
+  }
+
+  const deleted = [];
+  const skipped = [];
+  for (const alias of usedAliases) {
+    if (alias.preserved) {
+      skipped.push({ email: alias.email, error: 'preserved' });
+      continue;
+    }
+    try {
+      await deleteIcloudAlias(alias);
+      deleted.push(alias.email);
+    } catch (err) {
+      skipped.push({ email: alias.email, error: getErrorMessage(err) });
+    }
+  }
+  return { deleted, skipped };
+}
+
+async function fetchIcloudHideMyEmail() {
+  return withIcloudLoginHelp('获取 iCloud 隐私邮箱', async () => {
+    throwIfStopped();
+    await addLog('iCloud：正在校验当前浏览器登录状态...', 'info');
+
+    const { serviceUrl, setupUrl } = await resolveIcloudPremiumMailService();
+    await addLog(`iCloud：已通过 ${new URL(setupUrl).host} 验证会话`, 'ok');
+
+    const existingAliasesResponse = await icloudRequest('GET', `${serviceUrl}/v2/hme/list`);
+    const state = await getState();
+    const existingAliases = normalizeIcloudAliasList(existingAliasesResponse, {
+      usedEmails: getEffectiveUsedEmails(state),
+      preservedEmails: getPreservedAliasMap(state),
+    });
+
+    const reusableAlias = pickReusableIcloudAlias(existingAliases);
+    if (reusableAlias) {
+      await setEmailState(reusableAlias.email);
+      await addLog(`iCloud：复用未使用别名 ${reusableAlias.email}`, 'ok');
+      broadcastIcloudAliasesChanged({ reason: 'selected', email: reusableAlias.email });
+      return reusableAlias.email;
+    }
+
+    await addLog('iCloud：没有可复用别名，开始生成新的 Hide My Email 地址...', 'warn');
+
+    const generated = await icloudRequest('POST', `${serviceUrl}/v1/hme/generate`);
+    if (!generated?.success || !generated?.result?.hme) {
+      throw new Error(generated?.error?.errorMessage || 'iCloud 隐私邮箱生成失败。');
+    }
+
+    const reserved = await icloudRequest('POST', `${serviceUrl}/v1/hme/reserve`, {
+      data: {
+        hme: generated.result.hme,
+        label: getIcloudAliasLabel(),
+        note: 'Generated through Multi-Page Automation',
+      },
+    });
+
+    if (!reserved?.success || !reserved?.result?.hme?.hme) {
+      throw new Error(reserved?.error?.errorMessage || 'iCloud 隐私邮箱保留失败。');
+    }
+
+    const alias = String(reserved.result.hme.hme || '').trim().toLowerCase();
+    await setEmailState(alias);
+    await addLog(`iCloud：已创建并保留新别名 ${alias}`, 'ok');
+    broadcastIcloudAliasesChanged({ reason: 'created', email: alias });
+    return alias;
+  });
+}
+
+async function finalizeIcloudAliasAfterSuccessfulFlow(state) {
+  const email = String(state?.email || '').trim().toLowerCase();
+  if (!email) {
+    return { handled: false, deleted: false };
+  }
+
+  const knownIcloudAlias = normalizeEmailGenerator(state?.emailGenerator) === 'icloud'
+    || Object.prototype.hasOwnProperty.call(getManualAliasUsageMap(state), email)
+    || Object.prototype.hasOwnProperty.call(getPreservedAliasMap(state), email);
+  if (!knownIcloudAlias) {
+    return { handled: false, deleted: false };
+  }
+
+  await setIcloudAliasUsedState({ email, used: true }, { silentLog: true });
+  await addLog(`iCloud：流程成功后已标记 ${email} 为已用。`, 'ok');
+
+  if (!state.autoDeleteUsedIcloudAlias) {
+    return { handled: true, deleted: false };
+  }
+
+  if (isAliasPreserved(state, email)) {
+    await addLog(`iCloud：${email} 已被标记为保留，跳过自动删除。`, 'info');
+    return { handled: true, deleted: false };
+  }
+
+  try {
+    const aliases = await listIcloudAliases();
+    const alias = findIcloudAliasByEmail(aliases, email);
+    if (!alias) {
+      await addLog(`iCloud：自动删除跳过，列表中未找到 ${email}。`, 'warn');
+      return { handled: true, deleted: false };
+    }
+    if (alias.preserved) {
+      await addLog(`iCloud：${email} 在最新别名列表中已是保留状态，跳过自动删除。`, 'info');
+      return { handled: true, deleted: false };
+    }
+    if (!alias.anonymousId) {
+      await addLog(`iCloud：自动删除跳过，${email} 缺少 anonymousId，请先刷新列表后重试。`, 'warn');
+      return { handled: true, deleted: false };
+    }
+    await deleteIcloudAlias(alias);
+    await addLog(`iCloud：流程成功后已自动删除 ${email}。`, 'ok');
+    return { handled: true, deleted: true };
+  } catch (err) {
+    await addLog(`iCloud：自动删除 ${email} 失败：${getErrorMessage(err)}`, 'warn');
+    return { handled: true, deleted: false };
+  }
+}
+
 // ============================================================
 // Tab Registry
 // ============================================================
@@ -2413,12 +3096,16 @@ function buildLocalhostCleanupPrefix(rawUrl) {
 async function closeTabsByUrlPrefix(prefix, options = {}) {
   if (!prefix) return 0;
 
-  const { excludeTabIds = [] } = options;
+  const { excludeTabIds = [], excludeUrls = [], excludeLocalhostCallbacks = false } = options;
   const excluded = new Set(excludeTabIds.filter(id => Number.isInteger(id)));
+  const excludedUrls = new Set((Array.isArray(excludeUrls) ? excludeUrls : []).filter(Boolean));
   const tabs = await chrome.tabs.query({});
   const matchedIds = tabs
     .filter((tab) => Number.isInteger(tab.id) && !excluded.has(tab.id))
+    .filter((tab) => typeof tab.url === 'string' && !excludedUrls.has(tab.url))
+    .filter((tab) => !(excludeLocalhostCallbacks && isLocalhostOAuthCallbackUrl(tab.url)))
     .filter((tab) => typeof tab.url === 'string' && tab.url.startsWith(prefix))
+    .filter((tab) => !isLocalhostOAuthCallbackUrl(tab.url))
     .map((tab) => tab.id);
 
   if (!matchedIds.length) return 0;
@@ -3006,6 +3693,7 @@ function getSourceLabel(source) {
     'duck-mail': 'Duck 邮箱',
     'hotmail-api': 'Hotmail（远程/本地）',
     'luckmail-api': 'LuckMail（API 购邮）',
+    'cloudflare-temp-email': 'Cloudflare Temp Email',
   };
   return labels[source] || source || '未知来源';
 }
@@ -3981,6 +4669,41 @@ async function handleMessage(message, sender) {
       return { ok: true, email };
     }
 
+    case 'CHECK_ICLOUD_SESSION': {
+      clearStopRequest();
+      return await checkIcloudSession();
+    }
+
+    case 'LIST_ICLOUD_ALIASES': {
+      clearStopRequest();
+      const aliases = await listIcloudAliases();
+      return { ok: true, aliases };
+    }
+
+    case 'SET_ICLOUD_ALIAS_USED_STATE': {
+      clearStopRequest();
+      const result = await setIcloudAliasUsedState(message.payload || {});
+      return { ok: true, ...result };
+    }
+
+    case 'SET_ICLOUD_ALIAS_PRESERVED_STATE': {
+      clearStopRequest();
+      const result = await setIcloudAliasPreservedState(message.payload || {});
+      return { ok: true, ...result };
+    }
+
+    case 'DELETE_ICLOUD_ALIAS': {
+      clearStopRequest();
+      const result = await deleteIcloudAlias(message.payload || {});
+      return { ok: true, ...result };
+    }
+
+    case 'DELETE_USED_ICLOUD_ALIASES': {
+      clearStopRequest();
+      const result = await deleteUsedIcloudAliases();
+      return { ok: true, ...result };
+    }
+
     case 'STOP_FLOW': {
       await requestStop();
       return { ok: true };
@@ -4071,8 +4794,12 @@ async function handleStepData(step, payload) {
       }
       const localhostPrefix = buildLocalhostCleanupPrefix(payload.localhostUrl);
       if (localhostPrefix) {
-        await closeTabsByUrlPrefix(localhostPrefix);
+        await closeTabsByUrlPrefix(localhostPrefix, {
+          excludeUrls: [payload.localhostUrl],
+          excludeLocalhostCallbacks: true,
+        });
       }
+      await finalizeIcloudAliasAfterSuccessfulFlow(latestState);
       if (shouldUseCustomRegistrationEmail(latestState) && latestState.email) {
         await setEmailStateSilently(null);
       }
@@ -4364,7 +5091,12 @@ function getEmailGeneratorLabel(generator) {
   if (generator === 'custom') {
     return '自定义邮箱';
   }
-  return generator === 'cloudflare' ? 'Cloudflare 邮箱' : 'Duck 邮箱';
+  if (generator === 'icloud') {
+    return 'iCloud 隐私邮箱';
+  }
+  if (generator === 'cloudflare') return 'Cloudflare 邮箱';
+  if (generator === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return 'Cloudflare Temp Email';
+  return 'Duck 邮箱';
 }
 
 function generateCloudflareAliasLocalPart() {
@@ -4404,6 +5136,107 @@ async function fetchCloudflareEmail(state, options = {}) {
   return aliasEmail;
 }
 
+function ensureCloudflareTempEmailConfig(state, options = {}) {
+  const {
+    requireAdminAuth = false,
+    requireDomain = false,
+  } = options;
+  const config = getCloudflareTempEmailConfig(state);
+  if (!config.baseUrl) {
+    throw new Error('Cloudflare Temp Email 服务地址为空或格式无效。');
+  }
+  if (requireAdminAuth && !config.adminAuth) {
+    throw new Error('Cloudflare Temp Email 缺少 Admin Auth。');
+  }
+  if (requireDomain && !config.domain) {
+    throw new Error('Cloudflare Temp Email 域名为空或格式无效。');
+  }
+  return config;
+}
+
+async function requestCloudflareTempEmailJson(config, path, options = {}) {
+  const {
+    method = 'GET',
+    payload,
+    searchParams,
+    timeoutMs = 20000,
+  } = options;
+
+  const url = new URL(joinCloudflareTempEmailUrl(config.baseUrl, path));
+  if (searchParams && typeof searchParams === 'object') {
+    for (const [key, value] of Object.entries(searchParams)) {
+      if (value === undefined || value === null || value === '') continue;
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+
+  let response;
+  try {
+    response = await fetch(url.toString(), {
+      method,
+      headers: buildCloudflareTempEmailHeaders(config, {
+        json: payload !== undefined,
+      }),
+      body: payload !== undefined ? JSON.stringify(payload) : undefined,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const errorMessage = err?.name === 'AbortError'
+      ? `Cloudflare Temp Email 请求超时（>${Math.round(timeoutMs / 1000)} 秒）`
+      : `Cloudflare Temp Email 请求失败：${err.message}`;
+    throw new Error(errorMessage);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const text = await response.text();
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = text;
+  }
+
+  if (!response.ok) {
+    const payloadError = typeof parsed === 'object' && parsed
+      ? (parsed.message || parsed.error || parsed.msg)
+      : '';
+    throw new Error(`Cloudflare Temp Email 请求失败：${payloadError || text || `HTTP ${response.status}`}`);
+  }
+
+  return parsed;
+}
+
+async function fetchCloudflareTempEmailAddress(state, options = {}) {
+  throwIfStopped();
+  const latestState = state || await getState();
+  const config = ensureCloudflareTempEmailConfig(latestState, {
+    requireAdminAuth: true,
+    requireDomain: true,
+  });
+  const requestedName = String(options.localPart || options.name || '').trim().toLowerCase() || generateCloudflareAliasLocalPart();
+  const payload = {
+    enablePrefix: true,
+    name: requestedName,
+    domain: config.domain,
+  };
+  const result = await requestCloudflareTempEmailJson(config, '/admin/new_address', {
+    method: 'POST',
+    payload,
+  });
+  const address = normalizeCloudflareTempEmailAddress(getCloudflareTempEmailAddressFromResponse(result));
+  if (!address) {
+    throw new Error('Cloudflare Temp Email 未返回可用邮箱地址。');
+  }
+
+  await setEmailState(address);
+  await addLog(`Cloudflare Temp Email：已生成 ${address}`, 'ok');
+  return address;
+}
+
 async function fetchDuckEmail(options = {}) {
   throwIfStopped();
   const { generateNew = true } = options;
@@ -4435,8 +5268,14 @@ async function fetchGeneratedEmail(state, options = {}) {
   if (generator === 'custom') {
     throw new Error('当前邮箱生成方式为自定义邮箱，请直接填写注册邮箱。');
   }
+  if (generator === 'icloud') {
+    return fetchIcloudHideMyEmail();
+  }
   if (generator === 'cloudflare') {
     return fetchCloudflareEmail(currentState, options);
+  }
+  if (generator === CLOUDFLARE_TEMP_EMAIL_GENERATOR) {
+    return fetchCloudflareTempEmailAddress(currentState, options);
   }
   return fetchDuckEmail(options);
 }
@@ -4451,6 +5290,7 @@ let autoRunTotalRuns = 1;
 let autoRunAttemptRun = 0;
 const EMAIL_FETCH_MAX_ATTEMPTS = 5;
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
+const STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS = 25000;
 const AUTO_STEP_DELAYS = {
   1: 2000,
   2: 2000,
@@ -4546,7 +5386,10 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
     } catch (err) {
       lastError = err;
       await addLog(`${generatorLabel}自动获取失败（${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS}）：${err.message}`, 'warn');
-      if (generator === 'cloudflare' && /域名/.test(String(err.message || ''))) {
+      if (
+        (generator === 'cloudflare' && /域名/.test(String(err.message || '')))
+        || (generator === CLOUDFLARE_TEMP_EMAIL_GENERATOR && /(服务地址|Admin Auth|域名)/.test(String(err.message || '')))
+      ) {
         break;
       }
     }
@@ -5674,6 +6517,9 @@ function getMailConfig(state) {
   if (provider === LUCKMAIL_PROVIDER) {
     return { provider: LUCKMAIL_PROVIDER, label: 'LuckMail（API 购邮）' };
   }
+  if (provider === CLOUDFLARE_TEMP_EMAIL_PROVIDER) {
+    return { provider: CLOUDFLARE_TEMP_EMAIL_PROVIDER, label: 'Cloudflare Temp Email' };
+  }
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 邮箱' };
   }
@@ -5844,6 +6690,16 @@ async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) 
       ...pollOverrides,
     });
   }
+  if (mail.provider === CLOUDFLARE_TEMP_EMAIL_PROVIDER) {
+    return pollCloudflareTempEmailVerificationCode(step, state, {
+      ...getVerificationPollPayload(step, state),
+      ...pollOverrides,
+    });
+  }
+
+  if (Number(pollOverrides.resendIntervalMs) > 0) {
+    return pollFreshVerificationCodeWithResendInterval(step, state, mail, pollOverrides);
+  }
 
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
@@ -5913,6 +6769,109 @@ async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) 
   throw lastError || new Error(`步骤 ${step}：无法获取新的${getVerificationCodeLabel(step)}验证码。`);
 }
 
+async function pollFreshVerificationCodeWithResendInterval(step, state, mail, pollOverrides = {}) {
+  const stateKey = getVerificationCodeStateKey(step);
+  const rejectedCodes = new Set();
+  if (state[stateKey]) {
+    rejectedCodes.add(state[stateKey]);
+  }
+  for (const code of (pollOverrides.excludeCodes || [])) {
+    if (code) rejectedCodes.add(code);
+  }
+
+  const {
+    maxRounds: _ignoredMaxRounds,
+    resendIntervalMs: _ignoredResendIntervalMs,
+    lastResendAt: _ignoredLastResendAt,
+    ...payloadOverrides
+  } = pollOverrides;
+  let lastError = null;
+  const filterAfterTimestamp = payloadOverrides.filterAfterTimestamp ?? getVerificationPollPayload(step, state).filterAfterTimestamp;
+  const maxRounds = pollOverrides.maxRounds || VERIFICATION_POLL_MAX_ROUNDS;
+  const resendIntervalMs = Math.max(0, Number(pollOverrides.resendIntervalMs) || 0);
+  let lastResendAt = Number(pollOverrides.lastResendAt) || 0;
+
+  for (let round = 1; round <= maxRounds; round++) {
+    throwIfStopped();
+    if (round > 1) {
+      lastResendAt = await requestVerificationCodeResend(step);
+    }
+
+    while (true) {
+      throwIfStopped();
+      const payload = getVerificationPollPayload(step, state, {
+        ...payloadOverrides,
+        filterAfterTimestamp,
+        excludeCodes: [...rejectedCodes],
+      });
+
+      if (lastResendAt > 0) {
+        const remainingBeforeResendMs = Math.max(0, resendIntervalMs - (Date.now() - lastResendAt));
+        const baseMaxAttempts = Math.max(1, Number(payload.maxAttempts) || 5);
+        const intervalMs = Math.max(1, Number(payload.intervalMs) || 3000);
+        payload.maxAttempts = Math.max(1, Math.min(baseMaxAttempts, Math.floor(remainingBeforeResendMs / intervalMs) + 1));
+      }
+
+      try {
+        const result = await sendToMailContentScriptResilient(
+          mail,
+          {
+            type: 'POLL_EMAIL',
+            step,
+            source: 'background',
+            payload,
+          },
+          {
+            timeoutMs: 45000,
+            maxRecoveryAttempts: 2,
+          }
+        );
+
+        if (result && result.error) {
+          throw new Error(result.error);
+        }
+
+        if (!result || !result.code) {
+          throw new Error(`步骤 ${step}：邮箱轮询结束，但未获取到验证码。`);
+        }
+
+        if (rejectedCodes.has(result.code)) {
+          throw new Error(`步骤 ${step}：再次收到了相同的${getVerificationCodeLabel(step)}验证码：${result.code}`);
+        }
+
+        return {
+          ...result,
+          lastResendAt,
+        };
+      } catch (err) {
+        if (isStopError(err)) {
+          throw err;
+        }
+        lastError = err;
+        await addLog(`步骤 ${step}：${err.message}`, 'warn');
+      }
+
+      const remainingBeforeResendMs = lastResendAt > 0
+        ? Math.max(0, resendIntervalMs - (Date.now() - lastResendAt))
+        : 0;
+      if (remainingBeforeResendMs > 0) {
+        await addLog(
+          `步骤 ${step}：距离下次重新发送验证码还差 ${Math.ceil(remainingBeforeResendMs / 1000)} 秒，继续刷新邮箱（第 ${round}/${maxRounds} 轮）...`,
+          'info'
+        );
+        continue;
+      }
+
+      if (round < maxRounds) {
+        await addLog(`步骤 ${step}：已到 25 秒重发间隔，准备重新发送验证码（第 ${round + 1}/${maxRounds} 轮）...`, 'warn');
+      }
+      break;
+    }
+  }
+
+  throw lastError || new Error(`步骤 ${step}：无法获取新的${getVerificationCodeLabel(step)}验证码。`);
+}
+
 async function submitVerificationCode(step, code) {
   const signupTabId = await getTabId('signup-page');
   if (!signupTabId) {
@@ -5957,10 +6916,12 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
     ? Boolean(options.requestFreshCodeFirst)
     : (hotmailPollConfig?.requestFreshCodeFirst ?? false);
   const maxSubmitAttempts = 3;
+  const resendIntervalMs = Math.max(0, Number(options.resendIntervalMs) || 0);
+  let lastResendAt = Number(options.lastResendAt) || 0;
 
   if (requestFreshCodeFirst) {
     try {
-      await requestVerificationCodeResend(step);
+      lastResendAt = await requestVerificationCodeResend(step);
       await addLog(`步骤 ${step}：已先请求一封新的${getVerificationCodeLabel(step)}验证码，再开始轮询邮箱。`, 'warn');
     } catch (err) {
       if (isStopError(err) || (step === 7 && isStep7RestartFromStep6Error(err))) {
@@ -5982,7 +6943,10 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
     const result = await pollFreshVerificationCode(step, state, mail, {
       excludeCodes: [...rejectedCodes],
       filterAfterTimestamp: nextFilterAfterTimestamp ?? undefined,
+      resendIntervalMs,
+      lastResendAt,
     });
+    lastResendAt = Number(result?.lastResendAt) || lastResendAt;
 
     throwIfStopped();
     await addLog(`步骤 ${step}：已获取${getVerificationCodeLabel(step)}验证码：${result.code}`);
@@ -5997,7 +6961,18 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
         throw new Error(`步骤 ${step}：验证码连续失败，已达到 ${maxSubmitAttempts} 次重试上限。`);
       }
 
-      await requestVerificationCodeResend(step);
+      const remainingBeforeResendMs = resendIntervalMs > 0 && lastResendAt > 0
+        ? Math.max(0, resendIntervalMs - (Date.now() - lastResendAt))
+        : 0;
+      if (remainingBeforeResendMs > 0) {
+        await addLog(
+          `步骤 ${step}：提交失败后距离下次重新发送验证码还差 ${Math.ceil(remainingBeforeResendMs / 1000)} 秒，先继续刷新邮箱（${attempt + 1}/${maxSubmitAttempts}）...`,
+          'warn'
+        );
+        continue;
+      }
+
+      lastResendAt = await requestVerificationCodeResend(step);
       await addLog(`步骤 ${step}：提交失败后已请求新验证码（${attempt + 1}/${maxSubmitAttempts}）...`, 'warn');
       continue;
     }
@@ -6059,7 +7034,7 @@ async function executeStep4(state) {
   }
 
   throwIfStopped();
-  if (mail.provider === HOTMAIL_PROVIDER || mail.provider === LUCKMAIL_PROVIDER) {
+  if (mail.provider === HOTMAIL_PROVIDER || mail.provider === LUCKMAIL_PROVIDER || mail.provider === CLOUDFLARE_TEMP_EMAIL_PROVIDER) {
     await addLog(`步骤 4：正在通过 ${mail.label} 轮询验证码...`);
   } else {
     await addLog(`步骤 4：正在打开${mail.label}...`);
@@ -6087,6 +7062,7 @@ async function executeStep4(state) {
   await resolveVerificationStep(4, state, mail, {
     filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
     requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
+    resendIntervalMs: mail.provider === HOTMAIL_PROVIDER ? 0 : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
   });
   return;
 }
@@ -6194,7 +7170,7 @@ async function runStep7Attempt(state) {
   }
 
   throwIfStopped();
-  if (mail.provider === HOTMAIL_PROVIDER || mail.provider === LUCKMAIL_PROVIDER) {
+  if (mail.provider === HOTMAIL_PROVIDER || mail.provider === LUCKMAIL_PROVIDER || mail.provider === CLOUDFLARE_TEMP_EMAIL_PROVIDER) {
     await addLog(`步骤 7：正在通过 ${mail.label} 轮询验证码...`);
   } else {
     await addLog(`步骤 7：正在打开${mail.label}...`);
@@ -6221,6 +7197,7 @@ async function runStep7Attempt(state) {
   await resolveVerificationStep(7, state, mail, {
     filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
     requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
+    resendIntervalMs: mail.provider === HOTMAIL_PROVIDER ? 0 : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
   });
 }
 

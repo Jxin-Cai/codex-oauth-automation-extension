@@ -60,11 +60,20 @@ const bundle = [
   extractFunction('hasSavedProgress'),
   extractFunction('getRunningSteps'),
   extractFunction('getAutoRunStatusPayload'),
+  extractFunction('createAutoRunRoundSummary'),
+  extractFunction('normalizeAutoRunRoundSummary'),
+  extractFunction('buildAutoRunRoundSummaries'),
+  extractFunction('serializeAutoRunRoundSummaries'),
+  extractFunction('getAutoRunRoundRetryCount'),
+  extractFunction('formatAutoRunFailureReasons'),
+  extractFunction('logAutoRunFinalSummary'),
+  extractFunction('waitBetweenAutoRunRounds'),
   extractFunction('autoRunLoop'),
 ].join('\n');
 
 const api = new Function(`
 const STOP_ERROR_MESSAGE = 'Flow stopped.';
+const AUTO_RUN_MAX_RETRIES_PER_ROUND = 3;
 const DEFAULT_STATE = {
   stepStatuses: {
     1: 'pending',
@@ -180,6 +189,20 @@ function cancelPendingCommands() {}
 function normalizeAutoRunFallbackThreadIntervalMinutes(value) {
   return Math.max(0, Math.floor(Number(value) || 0));
 }
+function buildAutoRunRoundSummaries(totalRuns, rawSummaries = []) {
+  return Array.from({ length: totalRuns }, (_, index) => ({
+    round: index + 1,
+    status: rawSummaries[index]?.status || 'pending',
+    attempts: rawSummaries[index]?.attempts || 0,
+    failureReasons: [...(rawSummaries[index]?.failureReasons || [])],
+    finalFailureReason: rawSummaries[index]?.finalFailureReason || '',
+  }));
+}
+function serializeAutoRunRoundSummaries(totalRuns, roundSummaries = []) {
+  return buildAutoRunRoundSummaries(totalRuns, roundSummaries);
+}
+async function logAutoRunFinalSummary() {}
+async function waitBetweenAutoRunRounds() {}
 
 const chrome = {
   runtime: {

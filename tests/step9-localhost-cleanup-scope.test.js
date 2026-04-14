@@ -52,7 +52,12 @@ function extractFunction(name) {
 
 const bundle = [
   extractFunction('getTabRegistry'),
+  extractFunction('normalizeEmailGenerator'),
   extractFunction('parseUrlSafely'),
+  extractFunction('isHotmailProvider'),
+  extractFunction('isCustomMailProvider'),
+  extractFunction('isGeneratedAliasProvider'),
+  extractFunction('shouldUseCustomRegistrationEmail'),
   extractFunction('isLocalhostOAuthCallbackUrl'),
   extractFunction('isLocalhostOAuthCallbackTabMatch'),
   extractFunction('closeLocalhostCallbackTabs'),
@@ -62,6 +67,9 @@ const bundle = [
 ].join('\n');
 
 const api = new Function(`
+const HOTMAIL_PROVIDER = 'hotmail-api';
+const CLOUDFLARE_TEMP_EMAIL_PROVIDER = 'cloudflare-temp-email';
+const CLOUDFLARE_TEMP_EMAIL_GENERATOR = 'cloudflare-temp-email';
 let currentState = {
   tabRegistry: {
     'signup-page': { tabId: 1, ready: true },
@@ -120,6 +128,11 @@ function broadcastDataUpdate() {}
 
 async function addLog(message) {
   logMessages.push(message);
+}
+
+async function finalizeIcloudAliasAfterSuccessfulFlow() {}
+function shouldUseCustomRegistrationEmail() {
+  return false;
 }
 
 ${bundle}
@@ -183,8 +196,8 @@ return {
   let snapshot = api.snapshot();
   assert.deepStrictEqual(
     snapshot.removedBatches,
-    [[1], [2, 3]],
-    'handleStepData(9) 应先关闭当前 callback 页，再按同前缀路径清理残留页'
+    [[1], [2]],
+    'handleStepData(9) 应先关闭当前 callback 页，再按同源首段路径清理残留页'
   );
   assert.strictEqual(
     snapshot.currentState.tabRegistry['signup-page'],

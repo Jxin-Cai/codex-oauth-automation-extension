@@ -222,13 +222,32 @@ function summarizeStatusBadgeEntries(entries) {
     .join(' | ');
 }
 
+const STEP9_SUCCESS_STATUSES = new Set([
+  'Authentication successful!',
+  'Аутентификация успешна!',
+  '认证成功！',
+]);
+
+function normalizeStep9StatusText(statusText) {
+  return String(statusText || '').replace(/\s+/g, ' ').trim();
+}
+
+function isStep9SuccessStatus(statusText) {
+  return STEP9_SUCCESS_STATUSES.has(normalizeStep9StatusText(statusText));
+}
+
+function isStep9SuccessLikeStatus(statusText) {
+  const text = normalizeStep9StatusText(statusText);
+  return /authentication successful|аутентификац.*успеш|认证成功/i.test(text);
+}
+
 function getStatusBadgeDiagnostics() {
   const entries = getStatusBadgeEntries();
   const visibleEntries = entries.filter((entry) => entry.visible);
   const selectedEntry = visibleEntries[0] || null;
   const selectedText = selectedEntry?.text || '';
-  const successLikeEntries = visibleEntries.filter((entry) => /认证成功/.test(entry.text || ''));
-  const exactSuccessEntries = visibleEntries.filter((entry) => entry.text === '认证成功！');
+  const successLikeEntries = visibleEntries.filter((entry) => isStep9SuccessLikeStatus(entry.text));
+  const exactSuccessEntries = visibleEntries.filter((entry) => isStep9SuccessStatus(entry.text));
   const visibleSummary = summarizeStatusBadgeEntries(visibleEntries);
   const pageSnippet = getPageTextSnippet();
 
@@ -312,7 +331,7 @@ async function waitForExactSuccessBadge(timeout = STEP9_SUCCESS_BADGE_TIMEOUT_MS
     if (typeof isRecoverableStep9AuthFailure === 'function' && isRecoverableStep9AuthFailure(statusText)) {
       throw new Error(`STEP9_OAUTH_RETRY::${statusText}`);
     }
-    if (statusText === '认证成功！') {
+    if (isStep9SuccessStatus(statusText)) {
       return statusText;
     }
     await sleep(200);
@@ -328,8 +347,8 @@ async function waitForExactSuccessBadge(timeout = STEP9_SUCCESS_BADGE_TIMEOUT_MS
     throw new Error(`STEP9_OAUTH_RETRY::${finalText}${diagnosticsSuffix}`);
   }
   throw new Error(finalText
-    ? `CPA 面板状态不是“认证成功！”，当前为“${finalText}”。${diagnosticsSuffix}`
-    : `CPA 面板长时间未出现“认证成功！”状态徽标。${diagnosticsSuffix}`);
+    ? `CPA 面板状态未进入成功状态，当前为“${finalText}”。${diagnosticsSuffix}`
+    : `CPA 面板长时间未出现成功状态徽标。${diagnosticsSuffix}`);
 }
 
 function findManagementKeyInput() {

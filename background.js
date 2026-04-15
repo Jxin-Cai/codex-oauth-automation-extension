@@ -7905,7 +7905,7 @@ async function executeCpaStep9(state) {
     inject: injectFiles,
     timeoutMs: 45000,
     retryDelayMs: 900,
-    logMessage: '姝ラ 9锛欳PA 闈㈡澘浠嶅湪鍔犺浇锛屾鍦ㄩ噸璇曡繛鎺ュ唴瀹硅剼鏈?..',
+    logMessage: '步骤 9：CPA 面板仍在加载，正在重试连接...',
   });
 
   await addLog('步骤 9：正在填写回调地址...');

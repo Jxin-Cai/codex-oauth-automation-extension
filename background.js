@@ -119,6 +119,7 @@ const AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS = 600;
 const LEGACY_AUTO_STEP_DELAY_KEYS = ['autoStepRandomDelayMinSeconds', 'autoStepRandomDelayMaxSeconds'];
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
+const DEFAULT_CPA_CALLBACK_MODE = 'step8';
 const MAIL_2925_MODE_PROVIDE = 'provide';
 const MAIL_2925_MODE_RECEIVE = 'receive';
 const DEFAULT_MAIL_2925_MODE = MAIL_2925_MODE_PROVIDE;
@@ -170,6 +171,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   vpsUrl: '',
   vpsPassword: '',
   localCpaStep9Mode: DEFAULT_LOCAL_CPA_STEP9_MODE,
+  cpaCallbackMode: DEFAULT_CPA_CALLBACK_MODE,
   sub2apiUrl: DEFAULT_SUB2API_URL,
   sub2apiEmail: '',
   sub2apiPassword: '',
@@ -556,6 +558,12 @@ function normalizeLocalCpaStep9Mode(value = '') {
     : DEFAULT_LOCAL_CPA_STEP9_MODE;
 }
 
+function normalizeCpaCallbackMode(value = '') {
+  return String(value || '').trim().toLowerCase() === 'step6'
+    ? 'step6'
+    : DEFAULT_CPA_CALLBACK_MODE;
+}
+
 function normalizeCloudflareDomain(rawValue = '') {
   let value = String(rawValue || '').trim().toLowerCase();
   if (!value) return '';
@@ -652,6 +660,8 @@ function normalizePersistentSettingValue(key, value) {
       return String(value || '');
     case 'localCpaStep9Mode':
       return normalizeLocalCpaStep9Mode(value);
+    case 'cpaCallbackMode':
+      return normalizeCpaCallbackMode(value);
     case 'sub2apiUrl':
       return String(value || '').trim();
     case 'sub2apiEmail':
@@ -3179,6 +3189,11 @@ function shouldBypassStep9ForLocalCpa(state) {
   return normalizeLocalCpaStep9Mode(state?.localCpaStep9Mode) === 'bypass'
     && Boolean(state?.localhostUrl)
     && isLocalCpaUrl(state?.vpsUrl);
+}
+
+function shouldSkipLoginVerificationForCpaCallback(state) {
+  return getPanelMode(state) === 'cpa'
+    && normalizeCpaCallbackMode(state?.cpaCallbackMode) === 'step6';
 }
 
 function matchesSourceUrlFamily(source, candidateUrl, referenceUrl) {
@@ -5772,6 +5787,11 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
   while (step <= 9) {
     try {
       await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
+      const latestState = await getState();
+      if (step === 6 && shouldSkipLoginVerificationForCpaCallback(latestState)) {
+        step = 8;
+        continue;
+      }
       step += 1;
     } catch (err) {
       const latestState = await getState();
@@ -7255,7 +7275,25 @@ async function ensureStep7VerificationPageReady() {
   throw new Error(`当前未进入登录验证码页面，请先重新完成步骤 6。当前状态：${stateLabel}.${urlPart}`.trim());
 }
 
+async function skipLoginVerificationStepsForCpaCallback() {
+  await setState({
+    lastLoginCode: null,
+    loginVerificationRequestedAt: null,
+  });
+  await setStepStatus(6, 'skipped');
+  await addLog('步骤 6：当前已选择“第六步回调”，直接跳过步骤 6、7。', 'warn');
+  const latestState = await getState();
+  if (!isStepDoneStatus(latestState.stepStatuses?.[7])) {
+    await setStepStatus(7, 'skipped');
+    await addLog('步骤 7：当前已选择“第六步回调”，本轮无需获取登录验证码。', 'warn');
+  }
+}
+
 async function executeStep6(state) {
+  if (shouldSkipLoginVerificationForCpaCallback(state)) {
+    await skipLoginVerificationStepsForCpaCallback();
+    return;
+  }
   if (!state.email) {
     throw new Error('缺少邮箱地址，请先完成步骤 3。');
   }
@@ -7384,6 +7422,16 @@ async function rerunStep6ForStep7Recovery() {
 }
 
 async function executeStep7(state) {
+  if (shouldSkipLoginVerificationForCpaCallback(state)) {
+    await setState({
+      lastLoginCode: null,
+      loginVerificationRequestedAt: null,
+    });
+    await setStepStatus(7, 'skipped');
+    await addLog('步骤 7：当前已选择“第六步回调”，本轮无需获取登录验证码。', 'warn');
+    return;
+  }
+
   let currentState = state;
   let mailPollingAttempt = 1;
   let lastMailPollingError = null;

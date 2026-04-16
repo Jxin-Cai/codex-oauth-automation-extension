@@ -48,6 +48,7 @@ const btnConfigMenu = document.getElementById('btn-config-menu');
 const configMenu = document.getElementById('config-menu');
 const btnExportSettings = document.getElementById('btn-export-settings');
 const btnImportSettings = document.getElementById('btn-import-settings');
+const btnExportAccounts = document.getElementById('btn-export-accounts');
 const inputImportSettingsFile = document.getElementById('input-import-settings-file');
 const selectPanelMode = document.getElementById('select-panel-mode');
 const rowVpsUrl = document.getElementById('row-vps-url');
@@ -4156,6 +4157,26 @@ btnExportSettings?.addEventListener('click', async () => {
     return;
   }
   await exportSettingsFile();
+});
+
+btnExportAccounts?.addEventListener('click', async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_CREATED_ACCOUNTS' });
+    if (!response?.ok) {
+      throw new Error('获取账号列表失败');
+    }
+    const accounts = response.accounts || [];
+    if (accounts.length === 0) {
+      await showToast('暂无已保存的账号记录。', 'warn');
+      return;
+    }
+    const json = JSON.stringify(accounts, null, 2);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    downloadTextFile(json, `codex-accounts-${ts}.json`);
+  } catch (err) {
+    console.error('[ExportAccounts]', err);
+    await showToast(`导出账号失败：${err.message}`, 'error');
+  }
 });
 
 btnImportSettings?.addEventListener('click', async () => {

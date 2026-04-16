@@ -1275,6 +1275,27 @@ async function resetState() {
   });
 }
 
+// ── Created-accounts persistent helpers (chrome.storage.local) ──
+
+async function saveCreatedAccount(record) {
+  const { createdAccounts = [] } = await chrome.storage.local.get('createdAccounts');
+  createdAccounts.push({ ...record, done: false });
+  await chrome.storage.local.set({ createdAccounts });
+}
+
+async function markLastAccountDone() {
+  const { createdAccounts = [] } = await chrome.storage.local.get('createdAccounts');
+  if (createdAccounts.length > 0) {
+    createdAccounts[createdAccounts.length - 1].done = true;
+    await chrome.storage.local.set({ createdAccounts });
+  }
+}
+
+async function getCreatedAccounts() {
+  const { createdAccounts = [] } = await chrome.storage.local.get('createdAccounts');
+  return createdAccounts;
+}
+
 /**
  * Generate a random password: 14 chars, mix of uppercase, lowercase, digits, symbols.
  */
@@ -4744,6 +4765,21 @@ async function skipStep(step) {
   await setStepStatus(step, 'skipped');
   await addLog(`步骤 ${step} 已跳过`, 'warn');
 
+  // 跳过 Step 5 时也保存账号密码
+  if (step === 5) {
+    const s5 = await getState();
+    await saveCreatedAccount({
+      email: s5.email || '',
+      password: s5.password || s5.customPassword || '',
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  // 跳过 Step 9 时标记账号为已完成
+  if (step === 9) {
+    await markLastAccountDone();
+  }
+
   if (step === 1) {
     const latestState = await getState();
     const step2Status = latestState.stepStatuses?.[2];
@@ -5039,6 +5075,10 @@ async function handleMessage(message, sender) {
       return { ok: true, ...(await exportSettingsBundle()) };
     }
 
+    case 'GET_CREATED_ACCOUNTS': {
+      return { ok: true, accounts: await getCreatedAccounts() };
+    }
+
     case 'IMPORT_SETTINGS': {
       const state = await importSettingsBundle(message.payload?.config || null);
       return { ok: true, state };
@@ -5260,6 +5300,15 @@ async function handleStepData(step, payload) {
         await setState({ loginVerificationRequestedAt: payload.loginVerificationRequestedAt });
       }
       break;
+    case 5: {
+      const s5 = await getState();
+      await saveCreatedAccount({
+        email: s5.email || '',
+        password: s5.password || s5.customPassword || '',
+        createdAt: new Date().toISOString(),
+      });
+      break;
+    }
     case 4:
       await setState({
         lastEmailTimestamp: payload.emailTimestamp || null,
@@ -5313,6 +5362,7 @@ async function handleStepData(step, payload) {
       if (shouldUseCustomRegistrationEmail(latestState) && latestState.email) {
         await setEmailStateSilently(null);
       }
+      await markLastAccountDone();
       break;
     }
   }

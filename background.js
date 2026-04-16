@@ -103,6 +103,7 @@ const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
+const STEP6_MAX_ATTEMPTS = 3;
 const STEP7_MAIL_POLLING_RECOVERY_MAX_ATTEMPTS = 8;
 const SUB2API_STEP1_RESPONSE_TIMEOUT_MS = 90000;
 const SUB2API_STEP9_RESPONSE_TIMEOUT_MS = 120000;
@@ -207,6 +208,7 @@ const PERSISTED_SETTING_DEFAULTS = {
 };
 
 const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
+const ACCOUNT_RUN_HISTORY_STORAGE_KEY = 'accountRunHistory';
 const SETTINGS_EXPORT_SCHEMA_VERSION = 1;
 const SETTINGS_EXPORT_FILENAME_PREFIX = 'multipage-settings';
 const STEP6_PRE_LOGIN_COOKIE_CLEAR_DELAY_MS = 25000;
@@ -880,6 +882,129 @@ async function setPersistentSettings(updates) {
   if (Object.keys(persistedUpdates).length > 0) {
     await chrome.storage.local.set(persistedUpdates);
   }
+}
+
+function normalizeAccountRunHistory(records) {
+  if (!Array.isArray(records)) {
+    return [];
+  }
+  return records
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({
+      email: String(item.email || '').trim(),
+      password: String(item.password || '').trim(),
+      status: String(item.status || '').trim().toLowerCase(),
+      recordedAt: String(item.recordedAt || '').trim(),
+      reason: String(item.reason || '').trim(),
+    }))
+    .filter((item) => item.email && item.password && item.status);
+}
+
+async function getPersistedAccountRunHistory() {
+  try {
+    const stored = await chrome.storage.local.get(ACCOUNT_RUN_HISTORY_STORAGE_KEY);
+    return normalizeAccountRunHistory(stored[ACCOUNT_RUN_HISTORY_STORAGE_KEY]);
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to read account run history:', err?.message || err);
+    return [];
+  }
+}
+
+function buildAccountRunHistoryRecord(state = {}, status = '', reason = '') {
+  const email = String(state.email || '').trim();
+  const password = String(state.password || state.customPassword || '').trim();
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  const normalizedReason = String(reason || '').trim();
+
+  if (!email || !password || !normalizedStatus) {
+    return null;
+  }
+
+  return {
+    email,
+    password,
+    status: normalizedStatus,
+    recordedAt: new Date().toISOString(),
+    reason: normalizedReason,
+  };
+}
+
+async function appendAccountRunHistoryRecord(status, stateOverride = null, reason = '') {
+  const state = stateOverride || await getState();
+  const record = buildAccountRunHistoryRecord(state, status, reason);
+  if (!record) {
+    return null;
+  }
+
+  const history = await getPersistedAccountRunHistory();
+  history.push(record);
+  await chrome.storage.local.set({
+    [ACCOUNT_RUN_HISTORY_STORAGE_KEY]: history,
+  });
+  return record;
+}
+
+async function appendAccountRunHistoryTextFile(record, stateOverride = null) {
+  const normalizedRecord = record && typeof record === 'object'
+    ? record
+    : buildAccountRunHistoryRecord(stateOverride || await getState(), '');
+  if (!normalizedRecord?.email || !normalizedRecord?.password || !normalizedRecord?.status) {
+    return null;
+  }
+
+  const state = stateOverride || await getState();
+  const helperBaseUrl = normalizeHotmailLocalBaseUrl(state.hotmailLocalBaseUrl);
+  let response;
+  try {
+    response = await fetch(buildHotmailLocalEndpoint(helperBaseUrl, '/append-account-log'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        email: normalizedRecord.email,
+        password: normalizedRecord.password,
+        status: normalizedRecord.status,
+        recordedAt: normalizedRecord.recordedAt,
+        reason: normalizedRecord.reason || '',
+      }),
+    });
+  } catch (err) {
+    throw new Error(`账号文本记录写入失败：无法连接本地 helper（${getErrorMessage(err)}）`);
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (err) {
+    throw new Error(`账号文本记录写入失败：本地 helper 返回了无法解析的响应（${getErrorMessage(err)}）`);
+  }
+
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(`账号文本记录写入失败：${payload?.error || `HTTP ${response.status}`}`);
+  }
+
+  return payload?.filePath || '';
+}
+
+async function appendAccountRunRecord(status, stateOverride = null, reason = '') {
+  const state = stateOverride || await getState();
+  const record = await appendAccountRunHistoryRecord(status, state, reason);
+  if (!record) {
+    return null;
+  }
+
+  try {
+    const filePath = await appendAccountRunHistoryTextFile(record, state);
+    if (filePath) {
+      await addLog(`账号记录已追加到本地文本：${filePath}`, 'info');
+    }
+  } catch (err) {
+    await addLog(getErrorMessage(err), 'warn');
+  }
+
+  return record;
 }
 
 function buildSettingsExportFilename(date = new Date()) {
@@ -4775,10 +4900,12 @@ async function handleMessage(message, sender) {
       if (isStopError(message.error)) {
         await setStepStatus(message.step, 'stopped');
         await addLog(`步骤 ${message.step} 已被用户停止`, 'warn');
+        await appendAccountRunRecord(`step${message.step}_stopped`, null, getErrorMessage(message.error));
         notifyStepError(message.step, message.error);
       } else {
         await setStepStatus(message.step, 'failed');
         await addLog(`步骤 ${message.step} 失败：${message.error}`, 'error');
+        await appendAccountRunRecord(`step${message.step}_failed`, null, getErrorMessage(message.error));
         notifyStepError(message.step, message.error);
       }
       return { ok: true };
@@ -5445,11 +5572,13 @@ async function executeStep(step, options = {}) {
     if (isStopError(err)) {
       await setStepStatus(step, 'stopped');
       await addLog(`步骤 ${step} 已被用户停止`, 'warn');
+      await appendAccountRunRecord(`step${step}_stopped`, null, getErrorMessage(err));
       throw err;
     }
     if (!(deferRetryableTransportError && doesStepUseCompletionSignal(step) && isRetryableContentScriptTransportError(err))) {
       await setStepStatus(step, 'failed');
       await addLog(`步骤 ${step} 失败：${err.message}`, 'error');
+      await appendAccountRunRecord(`step${step}_failed`, null, getErrorMessage(err));
     } else {
       console.warn(
         LOG_PREFIX,
@@ -5700,6 +5829,8 @@ let autoRunAttemptRun = 0;
 const EMAIL_FETCH_MAX_ATTEMPTS = 5;
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
 const STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS = 25000;
+const MAIL_2925_VERIFICATION_MAX_ATTEMPTS = 15;
+const MAIL_2925_VERIFICATION_INTERVAL_MS = 15000;
 const AUTO_STEP_DELAYS = {
   1: 2000,
   2: 2000,
@@ -6183,6 +6314,7 @@ async function autoRunLoop(totalRuns, options = {}) {
 
   for (let targetRun = resumeCurrentRun; targetRun <= totalRuns; targetRun += 1) {
     const roundSummary = roundSummaries[targetRun - 1];
+    let roundRecordAppended = false;
     const resumingCurrentRound = continueCurrentOnFirstAttempt && targetRun === resumeCurrentRun;
     let attemptRun = resumingCurrentRound ? resumeAttemptRun : 1;
     let reuseExistingProgress = resumingCurrentRound;
@@ -6250,10 +6382,23 @@ async function autoRunLoop(totalRuns, options = {}) {
         });
       }
 
-      if (forceFreshTabsNextRun) {
-        await addLog(`上一轮尝试已放弃，当前开始第 ${targetRun}/${totalRuns} 轮第 ${attemptRun} 次尝试。`, 'warn');
-        forceFreshTabsNextRun = false;
-      }
+        if (forceFreshTabsNextRun) {
+          await addLog(`上一轮尝试已放弃，当前开始第 ${targetRun}/${totalRuns} 轮第 ${attemptRun} 次尝试。`, 'warn');
+          forceFreshTabsNextRun = false;
+        }
+
+        const appendRoundRecordIfNeeded = async (status, reason = '') => {
+          if (roundRecordAppended) {
+            return;
+          }
+          if (typeof appendAccountRunRecord !== 'function') {
+            return;
+          }
+          const record = await appendAccountRunRecord(status, null, reason);
+          if (record) {
+            roundRecordAppended = true;
+          }
+        };
 
       try {
         throwIfStopped();
@@ -6276,11 +6421,13 @@ async function autoRunLoop(totalRuns, options = {}) {
         await setState({
           autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
         });
+        await appendRoundRecordIfNeeded('success');
         await addLog(`=== 第 ${targetRun}/${totalRuns} 轮完成（第 ${attemptRun} 次尝试成功）===`, 'ok');
         break;
       } catch (err) {
         if (isStopError(err)) {
           stoppedEarly = true;
+          await appendRoundRecordIfNeeded('stopped', getErrorMessage(err));
           await addLog(`第 ${targetRun}/${totalRuns} 轮已被用户停止`, 'warn');
           await broadcastAutoRunStatus('stopped', {
             currentRun: targetRun,
@@ -6290,7 +6437,9 @@ async function autoRunLoop(totalRuns, options = {}) {
           break;
         }
 
-        const reason = getErrorMessage(err);
+        const reason = typeof getErrorMessage === 'function'
+          ? getErrorMessage(err)
+          : String(err?.message || err || '');
         roundSummary.failureReasons.push(reason);
         const canRetry = autoRunSkipFailures && attemptRun < maxAttemptsForRound;
 
@@ -6322,6 +6471,7 @@ async function autoRunLoop(totalRuns, options = {}) {
           } catch (sleepError) {
             if (isStopError(sleepError)) {
               stoppedEarly = true;
+              await appendRoundRecordIfNeeded('stopped', getErrorMessage(sleepError));
               await addLog(`第 ${targetRun}/${totalRuns} 轮已被用户停止`, 'warn');
               await broadcastAutoRunStatus('stopped', {
                 currentRun: targetRun,
@@ -6344,6 +6494,7 @@ async function autoRunLoop(totalRuns, options = {}) {
           } catch (sleepError) {
             if (isStopError(sleepError)) {
               stoppedEarly = true;
+              await appendRoundRecordIfNeeded('stopped', getErrorMessage(sleepError));
               await addLog(`第 ${targetRun}/${totalRuns} 轮已被用户停止`, 'warn');
               await broadcastAutoRunStatus('stopped', {
                 currentRun: targetRun,
@@ -6364,6 +6515,7 @@ async function autoRunLoop(totalRuns, options = {}) {
         await setState({
           autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
         });
+        await appendRoundRecordIfNeeded('failed', reason);
         if (!autoRunSkipFailures) {
           cancelPendingCommands('当前轮执行失败。');
           await broadcastStopToContentScripts();
@@ -6949,14 +7101,15 @@ async function confirmCustomVerificationStepBypass(step) {
 }
 
 function getVerificationPollPayload(step, state, overrides = {}) {
+  const is2925Provider = state?.mailProvider === '2925';
   if (step === 4) {
     return {
       filterAfterTimestamp: getHotmailVerificationRequestTimestamp(4, state),
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm'],
       targetEmail: state.email,
-      maxAttempts: 5,
-      intervalMs: 3000,
+      maxAttempts: is2925Provider ? MAIL_2925_VERIFICATION_MAX_ATTEMPTS : 5,
+      intervalMs: is2925Provider ? MAIL_2925_VERIFICATION_INTERVAL_MS : 3000,
       ...overrides,
     };
   }
@@ -6966,8 +7119,8 @@ function getVerificationPollPayload(step, state, overrides = {}) {
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
     subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm', 'login'],
     targetEmail: state.email,
-    maxAttempts: 5,
-    intervalMs: 3000,
+    maxAttempts: is2925Provider ? MAIL_2925_VERIFICATION_MAX_ATTEMPTS : 5,
+    intervalMs: is2925Provider ? MAIL_2925_VERIFICATION_INTERVAL_MS : 3000,
     ...overrides,
   };
 }
@@ -6981,6 +7134,7 @@ async function requestVerificationCodeResend(step) {
 
   throwIfStopped();
   await chrome.tabs.update(signupTabId, { active: true });
+  await recoverSignupPageFromMethodNotAllowed(4);
   throwIfStopped();
   await addLog(`步骤 ${step}：正在请求新的${getVerificationCodeLabel(step)}验证码...`, 'warn');
   throwIfStopped();
@@ -7249,11 +7403,91 @@ async function submitVerificationCode(step, code) {
   return result || {};
 }
 
+async function submitVerificationCodeWithPageRecovery(step, code, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (step === 4) {
+      await recoverSignupPageFromMethodNotAllowed(4);
+    }
+
+    try {
+      return await submitVerificationCode(step, code);
+    } catch (err) {
+      lastError = err;
+      if (step !== 4 || attempt >= maxAttempts) {
+        throw err;
+      }
+
+      const recovered = await recoverSignupPageFromMethodNotAllowed(4);
+      if (!recovered) {
+        throw err;
+      }
+
+      await addLog(`步骤 4：填写验证码前页面跳到了 405，已按原路径恢复后重试提交（${attempt + 1}/${maxAttempts}）。`, 'warn');
+    }
+  }
+
+  throw lastError || new Error(`步骤 ${step}：验证码提交失败。`);
+}
+
+async function prepareStep4VerificationPageWithRecovery(state, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await recoverSignupPageFromMethodNotAllowed(4);
+    throwIfStopped();
+
+    try {
+      const prepareResult = await sendToContentScriptResilient(
+        'signup-page',
+        {
+          type: 'PREPARE_SIGNUP_VERIFICATION',
+          step: 4,
+          source: 'background',
+          payload: { password: state.password || state.customPassword || '' },
+        },
+        {
+          timeoutMs: 30000,
+          retryDelayMs: 700,
+          logMessage: '步骤 4：认证页正在切换，等待页面重新就绪后继续检测...',
+        }
+      );
+
+      if (prepareResult?.error) {
+        throw new Error(prepareResult.error);
+      }
+
+      return prepareResult || {};
+    } catch (err) {
+      throwIfStopped(err);
+      lastError = err;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+
+      const recovered = await recoverSignupPageFromMethodNotAllowed(4);
+      if (!recovered) {
+        throw err;
+      }
+
+      await addLog(`步骤 4：准备验证码页时检测到 405，已按原路径恢复并重试（${attempt + 1}/${maxAttempts}）。`, 'warn');
+    }
+  }
+
+  throw lastError || new Error('步骤 4：验证码页面准备失败。');
+}
+
 async function resolveVerificationStep(step, state, mail, options = {}) {
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
   const hotmailPollConfig = mail.provider === HOTMAIL_PROVIDER
     ? getHotmailVerificationPollConfig(step)
+    : null;
+  const beforeSubmit = typeof options.beforeSubmit === 'function'
+    ? options.beforeSubmit
     : null;
   const ignorePersistedLastCode = Boolean(hotmailPollConfig?.ignorePersistedLastCode);
   if (state[stateKey] && !ignorePersistedLastCode) {
@@ -7307,6 +7541,9 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
   }
 
   for (let attempt = 1; attempt <= maxSubmitAttempts; attempt++) {
+    if (step === 4) {
+      await recoverSignupPageFromMethodNotAllowed(4);
+    }
     const result = await pollFreshVerificationCode(step, state, mail, {
       excludeCodes: [...rejectedCodes],
       filterAfterTimestamp: nextFilterAfterTimestamp ?? undefined,
@@ -7318,8 +7555,16 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
 
     throwIfStopped();
     await addLog(`步骤 ${step}：已获取${getVerificationCodeLabel(step)}验证码：${result.code}`);
+    if (beforeSubmit) {
+      await beforeSubmit(result, {
+        attempt,
+        rejectedCodes: new Set(rejectedCodes),
+        filterAfterTimestamp: nextFilterAfterTimestamp ?? undefined,
+        lastResendAt,
+      });
+    }
     throwIfStopped();
-    const submitResult = await submitVerificationCode(step, result.code);
+    const submitResult = await submitVerificationCodeWithPageRecovery(step, result.code);
 
     if (submitResult.invalidCode) {
       rejectedCodes.add(result.code);
@@ -7369,26 +7614,10 @@ async function executeStep4(state) {
   }
 
   await chrome.tabs.update(signupTabId, { active: true });
+  await recoverSignupPageFromMethodNotAllowed(4);
   throwIfStopped();
   await addLog('步骤 4：正在确认注册验证码页面是否就绪，必要时自动恢复密码页超时报错...');
-  const prepareResult = await sendToContentScriptResilient(
-    'signup-page',
-    {
-      type: 'PREPARE_SIGNUP_VERIFICATION',
-      step: 4,
-      source: 'background',
-      payload: { password: state.password || state.customPassword || '' },
-    },
-    {
-      timeoutMs: 30000,
-      retryDelayMs: 700,
-      logMessage: '步骤 4：认证页正在切换，等待页面重新就绪后继续检测...',
-    }
-  );
-
-  if (prepareResult && prepareResult.error) {
-    throw new Error(prepareResult.error);
-  }
+  const prepareResult = await prepareStep4VerificationPageWithRecovery(state);
   if (prepareResult?.alreadyVerified) {
     await completeStepFromBackground(4, {});
     return;
@@ -7425,10 +7654,13 @@ async function executeStep4(state) {
     }
   }
 
+  await recoverSignupPageFromMethodNotAllowed(4);
   await resolveVerificationStep(4, state, mail, {
     filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
     requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
-    resendIntervalMs: mail.provider === HOTMAIL_PROVIDER ? 0 : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
+    resendIntervalMs: (mail.provider === HOTMAIL_PROVIDER || mail.provider === '2925')
+      ? 0
+      : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
   });
   return;
 }
@@ -7443,12 +7675,36 @@ async function executeStep5(state) {
 
   await addLog(`步骤 5：已生成姓名 ${firstName} ${lastName}，生日 ${year}-${month}-${day}`);
 
-  await sendToContentScript('signup-page', {
+  const result = await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 5,
     source: 'background',
     payload: { firstName, lastName, year, month, day },
   });
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  if (result?.skipToStep6) {
+    await addLog('步骤 5：检测到已进入 ChatGPT 欢迎页，跳过资料填写并直接继续步骤 6。', 'warn');
+    await completeStepFromBackground(5, {
+      skipped: true,
+      skipToStep6: true,
+      reason: result.reason || 'welcome_page_after_signup',
+      url: result.url || '',
+    });
+    return;
+  }
+
+  if (result?.assumed) {
+    await addLog('步骤 5：提交资料后页面已离开生日表单，按成功继续进入步骤 6。', 'warn');
+    await completeStepFromBackground(5, {
+      assumed: true,
+      reason: result.reason || 'step5_form_disappeared_after_submit',
+      url: result.url || '',
+    });
+  }
 }
 
 // ============================================================
@@ -7617,6 +7873,63 @@ async function getLoginAuthStateFromContent() {
   return result || {};
 }
 
+async function getSignupPageHealthFromContent() {
+  const result = await sendToContentScriptResilient(
+    'signup-page',
+    {
+      type: 'GET_SIGNUP_PAGE_HEALTH',
+      source: 'background',
+      payload: {},
+    },
+    {
+      timeoutMs: 15000,
+      retryDelayMs: 600,
+      logMessage: '步骤 4：认证页正在切换，等待页面恢复后继续检查 405 状态...',
+    }
+  );
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  return result || {};
+}
+
+async function recoverSignupPageFromMethodNotAllowed(step = 4) {
+  const health = await getSignupPageHealthFromContent();
+  if (!health?.isMethodNotAllowed || !health?.url) {
+    return false;
+  }
+
+  await addLog(`步骤 ${step}：检测到认证页出现 405 Method Not Allowed，正在按当前页面路径重新打开...`, 'warn');
+  const leaveTabId = await reuseOrCreateTab('signup-page', SIGNUP_ENTRY_URL, {
+    inject: SIGNUP_PAGE_INJECT_FILES,
+    injectSource: 'signup-page',
+  });
+
+  await ensureContentScriptReadyOnTab('signup-page', leaveTabId, {
+    inject: SIGNUP_PAGE_INJECT_FILES,
+    injectSource: 'signup-page',
+    timeoutMs: 45000,
+    retryDelayMs: 900,
+    logMessage: `步骤 ${step}：认证页正在从 405 页面恢复，等待重新加载...`,
+  });
+  await addLog(`步骤 ${step}：已按当前路径重新打开认证页，继续执行。`, 'ok');
+  await sleepWithStop(600);
+  const tabId = await reuseOrCreateTab('signup-page', health.url, {
+    inject: SIGNUP_PAGE_INJECT_FILES,
+    injectSource: 'signup-page',
+  });
+  await ensureContentScriptReadyOnTab('signup-page', tabId, {
+    inject: SIGNUP_PAGE_INJECT_FILES,
+    injectSource: 'signup-page',
+    timeoutMs: 45000,
+    retryDelayMs: 900,
+    logMessage: `步骤 ${step}：认证页正在重新进入原路径，等待页面恢复...`,
+  });
+  return true;
+}
+
 async function ensureStep7VerificationPageReady() {
   const pageState = await getLoginAuthStateFromContent();
   if (pageState.state === 'verification_page') {
@@ -7642,7 +7955,8 @@ async function skipLoginVerificationStepsForCpaCallback() {
   }
 }
 
-async function executeStep6(state) {
+async function executeStep6(state, options = {}) {
+  const { skipPreLoginCleanup = false } = options;
   if (shouldSkipLoginVerificationForCpaCallback(state)) {
     await skipLoginVerificationStepsForCpaCallback();
     return;
@@ -7651,63 +7965,80 @@ async function executeStep6(state) {
     throw new Error('缺少邮箱地址，请先完成步骤 3。');
   }
 
-  await runPreStep6CookieCleanup();
+  if (!skipPreLoginCleanup) {
+    await runPreStep6CookieCleanup();
+  }
 
   let attempt = 0;
+  let lastError = null;
 
-  while (true) {
+  while (attempt < STEP6_MAX_ATTEMPTS) {
     throwIfStopped();
     attempt += 1;
-    const currentState = attempt === 1 ? state : await getState();
-    const password = currentState.password || currentState.customPassword || '';
-    const oauthUrl = await refreshOAuthUrlBeforeStep6(currentState);
 
-    if (attempt === 1) {
-      await addLog('步骤 6：正在打开最新 OAuth 链接并登录...');
-    } else {
-      await addLog(`步骤 6：上一轮登录未进入验证码页，正在重新发起第 ${attempt} 轮登录尝试...`, 'warn');
-    }
+    try {
+      const currentState = attempt === 1 ? state : await getState();
+      const password = currentState.password || currentState.customPassword || '';
+      const oauthUrl = await refreshOAuthUrlBeforeStep6(currentState);
 
-    await reuseOrCreateTab('signup-page', oauthUrl);
-
-    const result = await sendToContentScriptResilient(
-      'signup-page',
-      {
-        type: 'EXECUTE_STEP',
-        step: 6,
-        source: 'background',
-        payload: {
-          email: currentState.email,
-          password,
-        },
-      },
-      {
-        timeoutMs: 180000,
-        retryDelayMs: 700,
-        logMessage: '步骤 6：认证页正在切换，等待页面重新就绪后继续登录...',
+      if (attempt === 1) {
+        await addLog('步骤 6：正在打开最新 OAuth 链接并登录...');
+      } else {
+        await addLog(`步骤 6：上一轮失败后，正在进行第 ${attempt} 次尝试（最多 ${STEP6_MAX_ATTEMPTS} 次）...`, 'warn');
       }
-    );
 
-    if (result?.error) {
-      throw new Error(result.error);
+      await reuseOrCreateTab('signup-page', oauthUrl);
+
+      const result = await sendToContentScriptResilient(
+        'signup-page',
+        {
+          type: 'EXECUTE_STEP',
+          step: 6,
+          source: 'background',
+          payload: {
+            email: currentState.email,
+            password,
+          },
+        },
+        {
+          timeoutMs: 180000,
+          retryDelayMs: 700,
+          logMessage: '步骤 6：认证页正在切换，等待页面重新就绪后继续登录...',
+        }
+      );
+
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+
+      if (isStep6SuccessResult(result)) {
+        await completeStepFromBackground(6, {
+          loginVerificationRequestedAt: result.loginVerificationRequestedAt || null,
+        });
+        return;
+      }
+
+      if (isStep6RecoverableResult(result)) {
+        const reasonMessage = result.message
+          || `当前停留在${getLoginAuthStateLabel(result.state)}，准备重新执行步骤 6。`;
+        throw new Error(reasonMessage);
+      }
+
+      throw new Error('步骤 6：认证页未返回可识别的登录结果。');
+    } catch (err) {
+      throwIfStopped(err);
+      lastError = err;
+      const errorMessage = getErrorMessage(err);
+
+      if (attempt >= STEP6_MAX_ATTEMPTS) {
+        break;
+      }
+
+      await addLog(`步骤 6：第 ${attempt} 次尝试失败，原因：${errorMessage}；准备重试...`, 'warn');
     }
-
-    if (isStep6SuccessResult(result)) {
-      await completeStepFromBackground(6, {
-        loginVerificationRequestedAt: result.loginVerificationRequestedAt || null,
-      });
-      return;
-    }
-
-    if (isStep6RecoverableResult(result)) {
-      const reasonMessage = result.message
-        || `当前停留在${getLoginAuthStateLabel(result.state)}，准备重新执行步骤 6。`;
-      await addLog(`步骤 6：${reasonMessage}`, 'warn');
-      continue;
-    }
-
-    throw new Error('步骤 6：认证页未返回可识别的登录结果。');
   }
+
+  throw new Error(`步骤 6：判断失败后已重试 2 次，仍未成功。最后原因：${getErrorMessage(lastError)}`);
 }
 
 // ============================================================
@@ -7763,18 +8094,45 @@ async function runStep7Attempt(state) {
     }
   }
 
+  const shouldRefreshOAuthBeforeSubmit = getPanelMode(state) === 'cpa';
+  let step6ReplayCompleted = false;
+
   await resolveVerificationStep(7, state, mail, {
     filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : Math.max(0, stepStartedAt - 60000),
     requestFreshCodeFirst: false,
-    resendIntervalMs: mail.provider === HOTMAIL_PROVIDER ? 0 : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
+    resendIntervalMs: (mail.provider === HOTMAIL_PROVIDER || mail.provider === '2925')
+      ? 0
+      : STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
+    beforeSubmit: shouldRefreshOAuthBeforeSubmit ? async (result) => {
+      if (step6ReplayCompleted) {
+        return;
+      }
+
+      step6ReplayCompleted = true;
+      await addLog(`步骤 7：已拿到登录验证码 ${result.code}，先刷新 CPA OAuth 链接并重走步骤 6，再回填验证码。`, 'warn');
+      await rerunStep6ForStep7Recovery({
+        logMessage: '步骤 7：正在重新获取最新 CPA OAuth 链接，并快速重走步骤 6...',
+        skipPreLoginCleanup: true,
+        postStepDelayMs: 1200,
+      });
+      await ensureStep7VerificationPageReady();
+      await addLog('步骤 7：登录验证码页面已重新就绪，开始回填刚才获取到的验证码。', 'info');
+    } : undefined,
   });
 }
 
-async function rerunStep6ForStep7Recovery() {
+async function rerunStep6ForStep7Recovery(options = {}) {
+  const {
+    logMessage = '步骤 7：正在回到步骤 6，重新发起登录验证码流程...',
+    skipPreLoginCleanup = false,
+    postStepDelayMs = 3000,
+  } = options;
   const currentState = await getState();
-  await addLog('步骤 7：正在回到步骤 6，重新发起登录验证码流程...', 'warn');
-  await executeStep6(currentState);
-  await sleepWithStop(3000);
+  await addLog(logMessage, 'warn');
+  await executeStep6(currentState, { skipPreLoginCleanup });
+  if (postStepDelayMs > 0) {
+    await sleepWithStop(postStepDelayMs);
+  }
 }
 
 async function executeStep7(state) {

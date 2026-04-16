@@ -2,8 +2,11 @@ import email
 import html
 import imaplib
 import json
+import os
 import re
+import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
@@ -59,6 +62,9 @@ IMAP_HOST = "outlook.office365.com"
 IMAP_PORT = 993
 REQUEST_TIMEOUT_SECONDS = 45
 FETCH_LIMIT_DEFAULT = 5
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ACCOUNT_LOG_PATH = os.path.join(BASE_DIR, "data", "account-run-history.txt")
+ACCOUNT_LOG_LOCK = threading.Lock()
 
 
 def json_response(handler, status, payload):
@@ -111,6 +117,24 @@ def compact_text(value, limit=400):
 
 def log_info(message):
     print(f"[HotmailHelper] {message}", flush=True)
+
+
+def append_account_log(email_addr, password, status, recorded_at="", reason=""):
+    normalized_email = str(email_addr or "").strip()
+    normalized_password = str(password or "").strip()
+    normalized_status = str(status or "").strip().lower()
+    normalized_recorded_at = str(recorded_at or "").strip() or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    normalized_reason = str(reason or "").strip().replace("\r", " ").replace("\n", " ")
+
+    if not normalized_email or not normalized_password or not normalized_status:
+        raise RuntimeError("Missing email/password/status for account log append")
+
+    os.makedirs(os.path.dirname(ACCOUNT_LOG_PATH), exist_ok=True)
+    line = f"{normalized_recorded_at}\t{normalized_email}\t{normalized_password}\t{normalized_status}\t{normalized_reason}\n"
+    with ACCOUNT_LOG_LOCK:
+        with open(ACCOUNT_LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    return ACCOUNT_LOG_PATH
 
 
 def try_refresh_access_token(endpoint, client_id, refresh_token):
@@ -600,6 +624,21 @@ class HotmailHelperHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             payload = read_json_payload(self)
+
+            if self.path == "/append-account-log":
+                file_path = append_account_log(
+                    payload.get("email"),
+                    payload.get("password"),
+                    payload.get("status"),
+                    payload.get("recordedAt"),
+                    payload.get("reason"),
+                )
+                json_response(self, 200, {
+                    "ok": True,
+                    "filePath": file_path,
+                })
+                return
+
             email_addr = str(payload.get("email") or "").strip()
             client_id = str(payload.get("clientId") or "").strip()
             refresh_token = str(payload.get("refreshToken") or "").strip()
@@ -643,12 +682,14 @@ class HotmailHelperHandler(BaseHTTPRequestHandler):
 
             json_response(self, 404, {"ok": False, "error": f"Unsupported path: {self.path}"})
         except Exception as exc:
+            traceback.print_exc()
             json_response(self, 500, {"ok": False, "error": str(exc)})
 
 
 def main():
     server = ThreadingHTTPServer((HOST, PORT), HotmailHelperHandler)
     print(f"Hotmail helper listening on http://{HOST}:{PORT}", flush=True)
+    print(f"Account log file: {ACCOUNT_LOG_PATH}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

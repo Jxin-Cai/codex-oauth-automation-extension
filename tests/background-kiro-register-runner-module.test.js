@@ -291,6 +291,82 @@ test('kiro verification polling uses the registration email field instead of pag
   assert.equal(getKiroRuntime(completedPayload).register?.email, 'skater-twine-carve@duck.com');
 });
 
+test('kiro verification submit strips non-numeric prefix before filling AWS OTP', async () => {
+  const api = loadRegisterRunnerApi();
+  const currentState = {
+    email: 'hidden-user@icloud.com',
+    registrationEmailState: {
+      current: 'hidden-user@icloud.com',
+      previous: 'hidden-user@icloud.com',
+      source: 'flow',
+      updatedAt: Date.now(),
+    },
+    runtimeState: {
+      flowState: {
+        kiro: {
+          session: {
+            registerTabId: 104,
+          },
+          register: {
+            email: 'hidden-user@icloud.com',
+            loginUrl: 'https://app.kiro.dev/signin',
+            verificationRequestedAt: 1000,
+          },
+        },
+      },
+    },
+  };
+  const sentMessages = [];
+  let completedPayload = null;
+  const runner = api.createKiroRegisterRunner({
+    addLog: async () => {},
+    chrome: {
+      tabs: {
+        get: async (tabId) => ({ id: tabId, url: 'https://us-east-1.signin.aws/platform/d/signup' }),
+        update: async () => {},
+      },
+    },
+    completeNodeFromBackground: async (_nodeId, payload) => {
+      completedPayload = payload;
+    },
+    getState: async () => currentState,
+    getTabId: async () => 104,
+    isTabAlive: async () => true,
+    pollFlowVerificationCode: async () => ({ code: '验证码：888888', emailTimestamp: 2000, mailId: 'mail-icloud' }),
+    sendToContentScriptResilient: async (_sourceId, message) => {
+      sentMessages.push(message);
+      if (message.type === 'ENSURE_KIRO_PAGE_STATE') {
+        return {
+          state: 'register_otp_page',
+          url: 'https://us-east-1.signin.aws/platform/d/signup',
+          email: 'hidden-user@icloud.com',
+        };
+      }
+      if (message.type === 'EXECUTE_NODE') {
+        return { submitted: true, state: 'verification_submitted' };
+      }
+      if (message.type === 'ENSURE_KIRO_STATE_CHANGE') {
+        return {
+          state: 'create_password_page',
+          url: 'https://us-east-1.signin.aws/platform/d/signup',
+          email: 'hidden-user@icloud.com',
+        };
+      }
+      return {};
+    },
+    setState: async () => {},
+  });
+
+  await runner.executeKiroSubmitVerificationCode({
+    nodeId: 'kiro-submit-verification-code',
+    ...currentState,
+  });
+
+  const submitMessage = sentMessages.find((message) => message.type === 'EXECUTE_NODE');
+  assert.equal(submitMessage?.payload?.code, '888888');
+  assert.equal(completedPayload?.code, '888888');
+});
+
 test('kiro verification step can adopt the active AWS verify-otp page without step 1 runtime', async () => {
   const api = loadRegisterRunnerApi();
   const currentState = {

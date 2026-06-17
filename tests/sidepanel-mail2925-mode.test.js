@@ -60,8 +60,9 @@ test('sidepanel html keeps 2925 mode row and standalone pool settings row', () =
   assert.match(html, /id="row-mail2925-pool-settings"/);
 });
 
-test('sidepanel only treats 2925 as generated alias provider in provide mode', () => {
+test('sidepanel only treats 2925 provide mode or gmail generator as generated alias', () => {
   const bundle = [
+    extractFunction('getSelectedManagedAliasProvider'),
     extractFunction('isManagedAliasProvider'),
     extractFunction('usesGeneratedAliasMailProvider'),
   ].join('\n');
@@ -83,19 +84,14 @@ function getSelectedMail2925Mode() {
   return MAIL_2925_MODE_PROVIDE;
 }
 
-function getManagedAliasUtils() {
-  return {
-    usesManagedAliasGeneration(provider, options = {}) {
-      return String(provider || '').trim().toLowerCase() === 'gmail'
-        || (String(provider || '').trim().toLowerCase() === '2925'
-          && normalizeMail2925Mode(options.mail2925Mode) === MAIL_2925_MODE_PROVIDE);
-    },
-  };
+function getSelectedEmailGenerator() {
+  return 'duck';
 }
 
 ${bundle}
 
 return {
+  getSelectedManagedAliasProvider,
   isManagedAliasProvider,
   usesGeneratedAliasMailProvider,
 };
@@ -105,5 +101,9 @@ return {
   assert.equal(api.isManagedAliasProvider('2925', 'receive'), false);
   assert.equal(api.usesGeneratedAliasMailProvider('2925', 'provide'), true);
   assert.equal(api.usesGeneratedAliasMailProvider('2925', 'receive'), false);
-  assert.equal(api.usesGeneratedAliasMailProvider('gmail', 'receive'), true);
+  assert.equal(api.usesGeneratedAliasMailProvider('gmail', 'receive'), false);
+  assert.equal(api.usesGeneratedAliasMailProvider('163', 'receive', 'gmail'), true);
+  assert.equal(api.getSelectedManagedAliasProvider('163', 'receive', 'gmail'), 'gmail');
+  assert.equal(api.usesGeneratedAliasMailProvider('icloud', 'receive', 'gmail-alias'), true);
+  assert.equal(api.getSelectedManagedAliasProvider('icloud', 'receive', 'gmail-alias'), 'gmail');
 });

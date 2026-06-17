@@ -587,3 +587,8 @@ return { applySettingsState, selectIcloudTargetMailboxType, selectIcloudForwardM
   assert.equal(api.selectIcloudForwardMailProvider.value, 'gmail');
   assert.deepEqual(calls.at(-1), { target: 'forward-mailbox', provider: 'gmail' });
 });
+
+test('gmail mail provider can keep icloud hide-my-email generator', () => {
+  assert.match(source, /const gmailOnlyGenerators = new Set\(\[gmailAliasGenerator, customEmailPoolGenerator, 'icloud'\]\);/);
+  assert.match(source, /restoredMailProvider === GMAIL_PROVIDER[\s\S]*restoredEmailGenerator === 'icloud' \? 'icloud' : GMAIL_ALIAS_GENERATOR/);
+});

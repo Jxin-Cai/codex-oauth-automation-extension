@@ -2553,6 +2553,9 @@ function normalizeEmailGenerator(value = '') {
   if (normalized === 'icloud') {
     return 'icloud';
   }
+  if (normalized === GMAIL_PROVIDER) {
+    return GMAIL_PROVIDER;
+  }
   if (normalized === 'cloudflare') return 'cloudflare';
   if (normalized === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return CLOUDFLARE_TEMP_EMAIL_GENERATOR;
   if (normalized === 'cloudmail') return 'cloudmail';
@@ -6207,18 +6210,39 @@ function parseGmailBaseEmail(rawValue) {
   };
 }
 
-function isGeneratedAliasProvider(stateOrProvider, mail2925Mode = undefined) {
-  if (
-    stateOrProvider
-    && typeof stateOrProvider === 'object'
-    && !Array.isArray(stateOrProvider)
-    && normalizeEmailGenerator(stateOrProvider.emailGenerator) === (
-      typeof CUSTOM_EMAIL_POOL_GENERATOR === 'string'
-        ? CUSTOM_EMAIL_POOL_GENERATOR
-        : 'custom-pool'
-    )
-  ) {
-    return false;
+function getGeneratedAliasProvider(stateOrProvider, mail2925Mode = undefined, emailGenerator = undefined) {
+  const provider = typeof stateOrProvider === 'string'
+    ? stateOrProvider
+    : stateOrProvider?.mailProvider;
+  const resolvedMail2925Mode = mail2925Mode !== undefined
+    ? normalizeMail2925Mode(mail2925Mode)
+    : getMail2925Mode(stateOrProvider);
+  const resolvedEmailGenerator = normalizeEmailGenerator(
+    emailGenerator !== undefined
+      ? emailGenerator
+      : stateOrProvider?.emailGenerator
+  );
+  const customEmailPoolGenerator = typeof CUSTOM_EMAIL_POOL_GENERATOR === 'string'
+    ? CUSTOM_EMAIL_POOL_GENERATOR
+    : 'custom-pool';
+  const gmailAliasGenerator = typeof GMAIL_ALIAS_GENERATOR === 'string'
+    ? GMAIL_ALIAS_GENERATOR
+    : 'gmail-alias';
+  if (resolvedEmailGenerator === customEmailPoolGenerator) {
+    return '';
+  }
+  if (resolvedEmailGenerator === GMAIL_PROVIDER || resolvedEmailGenerator === gmailAliasGenerator) {
+    return GMAIL_PROVIDER;
+  }
+  return String(provider || '').trim().toLowerCase() === '2925'
+    && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE
+    ? '2925'
+    : '';
+}
+
+function isGeneratedAliasProvider(stateOrProvider, mail2925Mode = undefined, emailGenerator = undefined) {
+  if (typeof getGeneratedAliasProvider === 'function') {
+    return Boolean(getGeneratedAliasProvider(stateOrProvider, mail2925Mode, emailGenerator));
   }
   const provider = typeof stateOrProvider === 'string'
     ? stateOrProvider
@@ -6226,51 +6250,25 @@ function isGeneratedAliasProvider(stateOrProvider, mail2925Mode = undefined) {
   const resolvedMail2925Mode = mail2925Mode !== undefined
     ? normalizeMail2925Mode(mail2925Mode)
     : getMail2925Mode(stateOrProvider);
-  const utils = (typeof self !== 'undefined' ? self : globalThis).MultiPageManagedAliasUtils || null;
-  if (utils?.usesManagedAliasGeneration) {
-    return utils.usesManagedAliasGeneration(provider, { mail2925Mode: resolvedMail2925Mode });
+  const resolvedEmailGenerator = normalizeEmailGenerator(
+    emailGenerator !== undefined
+      ? emailGenerator
+      : stateOrProvider?.emailGenerator
+  );
+  const customEmailPoolGenerator = typeof CUSTOM_EMAIL_POOL_GENERATOR === 'string'
+    ? CUSTOM_EMAIL_POOL_GENERATOR
+    : 'custom-pool';
+  const gmailAliasGenerator = typeof GMAIL_ALIAS_GENERATOR === 'string'
+    ? GMAIL_ALIAS_GENERATOR
+    : 'gmail-alias';
+  if (resolvedEmailGenerator === customEmailPoolGenerator) {
+    return false;
   }
-  if (utils?.isManagedAliasProvider) {
-    if (String(provider || '').trim().toLowerCase() === '2925') {
-      return utils.isManagedAliasProvider(provider) && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE;
-    }
-    return utils.isManagedAliasProvider(provider);
+  if (resolvedEmailGenerator === GMAIL_PROVIDER || resolvedEmailGenerator === gmailAliasGenerator) {
+    return true;
   }
-  return provider === GMAIL_PROVIDER
-    || (provider === '2925' && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE);
-}
-
-function shouldUseCustomRegistrationEmail(state = {}) {
-  return isCustomMailProvider(state)
-    || (!isHotmailProvider(state)
-      && !isGeneratedAliasProvider(state)
-      && normalizeEmailGenerator(state.emailGenerator) === 'custom');
-}
-
-function buildGeneratedAliasEmail(state) {
-  const provider = state.mailProvider || '163';
-  const emailPrefix = (state.emailPrefix || '').trim();
-
-  if (provider === GMAIL_PROVIDER) {
-    if (!emailPrefix) {
-      throw new Error('Gmail 原邮箱未设置，请先在侧边栏填写。');
-    }
-    const parsed = parseGmailBaseEmail(emailPrefix);
-    if (!parsed) {
-      throw new Error('Gmail 原邮箱格式不正确，请填写类似 name@gmail.com 的地址。');
-    }
-    return `${parsed.localPart}+${generateRandomWordAliasTag()}@${parsed.domain}`;
-  }
-
-  if (!emailPrefix) {
-    throw new Error('2925 邮箱前缀未设置，请先在侧边栏填写。');
-  }
-
-  if (provider === '2925' && isGeneratedAliasProvider(state)) {
-    return `${emailPrefix}${generateRandomSuffix(6)}@2925.com`;
-  }
-
-  throw new Error(`未支持的别名邮箱类型：${provider}`);
+  return String(provider || '').trim().toLowerCase() === '2925'
+    && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE;
 }
 
 function getManagedAliasUtils() {
@@ -6350,16 +6348,17 @@ function isManagedAliasEmail(value, provider, baseEmail = '') {
 
 function getManagedAliasBaseEmail(state = {}, provider = state?.mailProvider) {
   const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const resolvedProvider = normalizedProvider || getGeneratedAliasProvider(state);
   const legacyEmailPrefix = String(state?.emailPrefix || '').trim();
-  if (normalizedProvider === GMAIL_PROVIDER) {
+  if (resolvedProvider === GMAIL_PROVIDER) {
     const gmailBaseEmail = String(state?.gmailBaseEmail || '').trim();
     if (gmailBaseEmail) {
       return gmailBaseEmail;
     }
-    return parseManagedAliasBaseEmail(legacyEmailPrefix, normalizedProvider) ? legacyEmailPrefix : '';
+    return parseManagedAliasBaseEmail(legacyEmailPrefix, resolvedProvider) ? legacyEmailPrefix : '';
   }
 
-  if (normalizedProvider === '2925') {
+  if (resolvedProvider === '2925') {
     const currentAccount = Boolean(state?.mail2925UseAccountPool)
       ? getCurrentMail2925Account(state)
       : null;
@@ -6370,43 +6369,10 @@ function getManagedAliasBaseEmail(state = {}, provider = state?.mailProvider) {
     if (mail2925BaseEmail) {
       return mail2925BaseEmail;
     }
-    return parseManagedAliasBaseEmail(legacyEmailPrefix, normalizedProvider) ? legacyEmailPrefix : '';
+    return parseManagedAliasBaseEmail(legacyEmailPrefix, resolvedProvider) ? legacyEmailPrefix : '';
   }
 
   return '';
-}
-
-function isGeneratedAliasProvider(stateOrProvider, mail2925Mode = undefined) {
-  if (
-    stateOrProvider
-    && typeof stateOrProvider === 'object'
-    && !Array.isArray(stateOrProvider)
-    && normalizeEmailGenerator(stateOrProvider.emailGenerator) === (
-      typeof CUSTOM_EMAIL_POOL_GENERATOR === 'string'
-        ? CUSTOM_EMAIL_POOL_GENERATOR
-        : 'custom-pool'
-    )
-  ) {
-    return false;
-  }
-  const provider = typeof stateOrProvider === 'string'
-    ? stateOrProvider
-    : stateOrProvider?.mailProvider;
-  const resolvedMail2925Mode = mail2925Mode !== undefined
-    ? normalizeMail2925Mode(mail2925Mode)
-    : getMail2925Mode(stateOrProvider);
-  const utils = getManagedAliasUtils();
-  if (utils?.usesManagedAliasGeneration) {
-    return utils.usesManagedAliasGeneration(provider, { mail2925Mode: resolvedMail2925Mode });
-  }
-  if (utils?.isManagedAliasProvider) {
-    if (String(provider || '').trim().toLowerCase() === '2925') {
-      return utils.isManagedAliasProvider(provider) && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE;
-    }
-    return utils.isManagedAliasProvider(provider);
-  }
-  return provider === GMAIL_PROVIDER
-    || (provider === '2925' && resolvedMail2925Mode === MAIL_2925_MODE_PROVIDE);
 }
 
 function shouldUseCustomRegistrationEmail(state = {}) {
@@ -6417,18 +6383,23 @@ function shouldUseCustomRegistrationEmail(state = {}) {
 }
 
 function isReusableGeneratedAliasEmail(state = {}, email = state?.email) {
-  if (!isGeneratedAliasProvider(state)) {
+  const provider = getGeneratedAliasProvider(state);
+  if (!provider) {
     return false;
   }
 
-  return isManagedAliasEmail(email, state?.mailProvider, getManagedAliasBaseEmail(state));
+  return isManagedAliasEmail(email, provider, getManagedAliasBaseEmail(state, provider));
 }
 
 function buildGeneratedAliasEmail(state) {
-  const provider = state.mailProvider || '163';
+  const provider = getGeneratedAliasProvider(state);
   const baseEmail = getManagedAliasBaseEmail(state, provider);
   const baseLabel = provider === GMAIL_PROVIDER ? 'Gmail 原邮箱' : '2925 基邮箱';
   const exampleEmail = provider === GMAIL_PROVIDER ? 'name@gmail.com' : 'name@2925.com';
+
+  if (!provider) {
+    throw new Error('当前未启用别名邮箱生成。');
+  }
 
   if (!baseEmail) {
     throw new Error(`${baseLabel}未设置，请先在侧边栏填写，或直接在“注册邮箱”中手动填写完整邮箱。`);
@@ -12094,6 +12065,9 @@ function getEmailGeneratorLabel(generator) {
   if (generator === 'icloud') {
     return 'iCloud 隐私邮箱';
   }
+  if (generator === GMAIL_PROVIDER) {
+    return 'Gmail +tag 邮箱';
+  }
   if (generator === 'cloudflare') return 'Cloudflare 邮箱';
   if (generator === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return 'Cloudflare Temp Email';
   if (generator === CLOUD_MAIL_GENERATOR) return 'Cloud Mail';
@@ -12231,6 +12205,7 @@ const generatedEmailHelpers = self.MultiPageGeneratedEmailHelpers?.createGenerat
   DUCK_AUTOFILL_URL,
   fetch,
   fetchIcloudHideMyEmail,
+  GMAIL_ALIAS_GENERATOR,
   getCloudflareTempEmailAddressFromResponse,
   getCloudflareTempEmailConfig,
   getCustomEmailPoolEmail: getCustomEmailPoolEmailForRun,
@@ -12846,17 +12821,13 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
   }
 
   if (isGeneratedAliasProvider(currentState)) {
-    if (currentState.mailProvider === GMAIL_PROVIDER) {
-      if (!currentState.emailPrefix) {
-        throw new Error('Gmail 原邮箱未设置，请先在侧边栏填写。');
-      }
-      await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：Gmail +tag 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
-      return null;
+    const aliasProvider = getGeneratedAliasProvider(currentState);
+    const baseEmail = getManagedAliasBaseEmail(currentState, aliasProvider);
+    const baseLabel = aliasProvider === GMAIL_PROVIDER ? 'Gmail 原邮箱' : '2925 基邮箱';
+    if (!baseEmail && !currentState.email) {
+      throw new Error(`${baseLabel}未设置，请先在侧边栏填写。`);
     }
-    if (!currentState.emailPrefix) {
-      throw new Error('2925 邮箱前缀未设置，请先在侧边栏填写。');
-    }
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：2925 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
+    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：${aliasProvider === GMAIL_PROVIDER ? 'Gmail +tag' : '2925'} 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
     return null;
   }
 
@@ -12988,11 +12959,9 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
       return currentState.email;
     }
 
+    const aliasProvider = getGeneratedAliasProvider(currentState);
     let managedAliasState = currentState;
-    if (
-      String(currentState.mailProvider || '').trim().toLowerCase() === '2925'
-      && Boolean(currentState.mail2925UseAccountPool)
-    ) {
+    if (aliasProvider === '2925' && Boolean(currentState.mail2925UseAccountPool)) {
       const account = await ensureMail2925AccountForFlow({
         allowAllocate: true,
         preferredAccountId: currentState.currentMail2925AccountId || null,
@@ -13005,14 +12974,14 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
       await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：已分配 2925 账号 ${account.email}（第 ${attemptRuns} 次尝试）===`, 'ok');
     }
 
-    const baseEmail = getManagedAliasBaseEmail(managedAliasState);
+    const baseEmail = getManagedAliasBaseEmail(managedAliasState, aliasProvider);
     if (!baseEmail && !managedAliasState.email) {
-      const baseLabel = currentState.mailProvider === GMAIL_PROVIDER ? 'Gmail 原邮箱' : '2925 基邮箱';
+      const baseLabel = aliasProvider === GMAIL_PROVIDER ? 'Gmail 原邮箱' : '2925 基邮箱';
       throw new Error(`${baseLabel}未设置，请先填写，或直接在“注册邮箱”中手动填写完整邮箱。`);
     }
 
     await addLog(
-      `=== 目标 ${targetRun}/${totalRuns} 轮：${currentState.mailProvider === GMAIL_PROVIDER ? 'Gmail +tag' : '2925'} 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`,
+      `=== 目标 ${targetRun}/${totalRuns} 轮：${aliasProvider === GMAIL_PROVIDER ? 'Gmail +tag' : '2925'} 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`,
       'info'
     );
     return null;

@@ -858,3 +858,62 @@ test('generated email helper forwards preserve identity context to the iCloud ge
   assert.equal(icloudOptions[0].state.signupPhoneNumber, '+447780579093');
   assert.equal(icloudOptions[0].state.emailGenerator, 'icloud');
 });
+
+test('generated email helper uses gmail-alias generator independently from mail provider', async () => {
+  const api = loadGeneratedEmailHelpersApi();
+  const events = [];
+
+  const helpers = api.createGeneratedEmailHelpers({
+    addLog: async () => {},
+    buildGeneratedAliasEmail: (state) => {
+      events.push(['provider', state.mailProvider]);
+      events.push(['generator', state.emailGenerator]);
+      return 'demo+tag@gmail.com';
+    },
+    buildCloudflareTempEmailHeaders: () => ({}),
+    CLOUDFLARE_TEMP_EMAIL_GENERATOR: 'cloudflare-temp-email',
+    DUCK_AUTOFILL_URL: 'https://duckduckgo.com/email',
+    fetch: async () => ({ ok: true, text: async () => '{}' }),
+    fetchIcloudHideMyEmail: async () => {
+      throw new Error('should not use icloud generator');
+    },
+    GMAIL_ALIAS_GENERATOR: 'gmail-alias',
+    getCloudflareTempEmailAddressFromResponse: () => '',
+    getCloudflareTempEmailConfig: () => ({ baseUrl: '', adminAuth: '', domain: '' }),
+    getState: async () => ({
+      mailProvider: 'icloud',
+      emailGenerator: 'gmail-alias',
+      gmailBaseEmail: 'demo@gmail.com',
+    }),
+    ensureMail2925AccountForFlow: async () => {
+      throw new Error('should not allocate 2925 account');
+    },
+    joinCloudflareTempEmailUrl: () => '',
+    normalizeCloudflareDomain: () => '',
+    normalizeCloudflareTempEmailAddress: () => '',
+    normalizeEmailGenerator: (value) => String(value || '').trim().toLowerCase(),
+    isGeneratedAliasProvider: () => true,
+    reuseOrCreateTab: async () => {},
+    sendToContentScript: async () => ({ email: '', generated: false }),
+    setEmailState: async (email) => {
+      events.push(['email', email]);
+    },
+    throwIfStopped: () => {},
+  });
+
+  const email = await helpers.fetchGeneratedEmail({
+    mailProvider: 'icloud',
+    emailGenerator: 'gmail-alias',
+    gmailBaseEmail: 'demo@gmail.com',
+  }, {
+    generator: 'gmail-alias',
+  });
+
+  assert.equal(email, 'demo+tag@gmail.com');
+  assert.deepStrictEqual(events, [
+    ['provider', 'gmail'],
+    ['generator', 'gmail-alias'],
+    ['email', 'demo+tag@gmail.com'],
+  ]);
+});
+

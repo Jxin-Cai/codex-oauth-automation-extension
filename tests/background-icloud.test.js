@@ -67,6 +67,7 @@ function createApi(overrides = {}) {
   return new Function('overrides', `
 const HOTMAIL_PROVIDER = 'hotmail-api';
 const HOTMAIL_SERVICE_MODE_LOCAL = 'local';
+const GMAIL_PROVIDER = 'gmail';
 const CLOUDFLARE_TEMP_EMAIL_GENERATOR = 'cloudflare-temp-email';
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
 const DEFAULT_HOTMAIL_REMOTE_BASE_URL = '';
@@ -174,7 +175,9 @@ return {
 test('normalizeEmailGenerator and label support icloud', () => {
   const api = createApi();
   assert.equal(api.normalizeEmailGenerator('icloud'), 'icloud');
+  assert.equal(api.normalizeEmailGenerator('gmail'), 'gmail');
   assert.equal(api.getEmailGeneratorLabel('icloud'), 'iCloud 隐私邮箱');
+  assert.equal(api.getEmailGeneratorLabel('gmail'), 'Gmail +tag 邮箱');
 });
 
 test('normalizePersistentSettingValue handles icloud settings', () => {

@@ -113,6 +113,15 @@
     return String(value ?? '').trim();
   }
 
+  function normalizeKiroVerificationCode(value = '') {
+    const rawCode = cleanString(value);
+    if (!rawCode || /^\d+$/.test(rawCode)) {
+      return rawCode;
+    }
+    const numericMatch = rawCode.match(/\d+/);
+    return numericMatch ? numericMatch[0] : rawCode;
+  }
+
   function normalizePositiveInteger(value, fallback) {
     const numeric = Math.floor(Number(value));
     if (Number.isInteger(numeric) && numeric > 0) {
@@ -1323,7 +1332,7 @@
           }),
         };
         const codeResult = await pollKiroVerificationCode(4, pollingState, nodeId);
-        const code = cleanString(codeResult?.code);
+        const code = normalizeKiroVerificationCode(codeResult?.code);
         if (!code) {
           throw new Error('未能获取到 Kiro 邮箱验证码。');
         }

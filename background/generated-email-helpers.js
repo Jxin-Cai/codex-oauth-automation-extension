@@ -12,6 +12,7 @@
       DUCK_AUTOFILL_URL,
       fetch,
       fetchIcloudHideMyEmail,
+      GMAIL_ALIAS_GENERATOR,
       getCloudflareTempEmailAddressFromResponse,
       getCloudflareTempEmailConfig,
       getCustomEmailPoolEmail,
@@ -272,9 +273,16 @@
 
     async function fetchManagedAliasEmail(state, options = {}) {
       throwIfStopped();
-      const provider = String(options.mailProvider || state?.mailProvider || '').trim().toLowerCase();
+      const generator = normalizeEmailGenerator(options.generator ?? state?.emailGenerator);
+      const gmailAliasGenerator = typeof GMAIL_ALIAS_GENERATOR === 'string'
+        ? GMAIL_ALIAS_GENERATOR
+        : 'gmail-alias';
+      const provider = generator === 'gmail' || generator === gmailAliasGenerator
+        ? 'gmail'
+        : String(options.mailProvider || state?.mailProvider || '').trim().toLowerCase();
       let mergedState = {
         ...(state || {}),
+        emailGenerator: generator,
         mailProvider: provider,
       };
       if (options.mail2925Mode !== undefined) {
@@ -314,12 +322,22 @@
 
     async function fetchGeneratedEmail(state, options = {}) {
       const currentState = state || await getState();
+      const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
+      const gmailAliasGenerator = typeof GMAIL_ALIAS_GENERATOR === 'string'
+        ? GMAIL_ALIAS_GENERATOR
+        : 'gmail-alias';
+      if (generator === 'gmail' || generator === gmailAliasGenerator) {
+        return fetchManagedAliasEmail(currentState, {
+          ...options,
+          generator,
+          mailProvider: 'gmail',
+        });
+      }
       const provider = String(options.mailProvider || currentState.mailProvider || '').trim().toLowerCase();
       const mail2925Mode = options.mail2925Mode !== undefined
         ? options.mail2925Mode
         : currentState.mail2925Mode;
-      const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
-      const mergedState = {
+      let mergedState = {
         ...currentState,
         mailProvider: provider || currentState.mailProvider,
         mail2925Mode,
@@ -341,7 +359,7 @@
         return fetchCustomEmailPoolEmail(mergedState, options);
       }
       const shouldUseManagedAlias = typeof isGeneratedAliasProvider === 'function'
-        ? isGeneratedAliasProvider(mergedState, mail2925Mode)
+        ? isGeneratedAliasProvider(mergedState, mail2925Mode, generator)
         : false;
       if (shouldUseManagedAlias) {
         return fetchManagedAliasEmail(mergedState, options);

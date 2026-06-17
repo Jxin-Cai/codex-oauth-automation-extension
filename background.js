@@ -14331,6 +14331,7 @@ const kiroPublisher = self.MultiPageBackgroundKiroPublisherKiroRs?.createKiroRsP
   completeNodeFromBackground,
   fetchImpl: typeof fetch === 'function' ? fetch.bind(globalThis) : null,
   getState,
+  markCurrentRegistrationAccountUsed,
   maybeSubmitFlowContribution,
   setState,
 });

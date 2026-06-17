@@ -183,6 +183,77 @@ test('kiro publisher reads latest kiro.rs key from background state instead of s
   assert.equal(completed[0].nodeId, 'kiro-upload-credential');
 });
 
+test('kiro publisher marks registration email used after successful upload', async () => {
+  const api = loadPublisherApi();
+  let liveState = {
+    targetId: 'kiro-rs',
+    kiroRsUrl: 'https://kiro.example.com/admin',
+    kiroRsKey: 'live-key',
+    email: 'hidden-user@icloud.com',
+    emailGenerator: 'icloud',
+    autoDeleteUsedIcloudAlias: true,
+    runtimeState: {
+      flowState: {
+        kiro: {
+          register: {
+            email: 'hidden-user@icloud.com',
+          },
+          desktopAuth: {
+            region: 'us-east-1',
+            clientId: 'client-001',
+            clientSecret: 'secret-001',
+            refreshToken: 'refresh-token-001',
+          },
+          upload: {
+            targetId: 'kiro-rs',
+          },
+        },
+      },
+    },
+  };
+  const markUsedCalls = [];
+  const publisher = api.createKiroRsPublisher({
+    addLog: async () => {},
+    completeNodeFromBackground: async () => {},
+    fetchImpl: async (_url, options = {}) => {
+      if ((options.method || 'GET') === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          text: async () => JSON.stringify({ items: [] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify({
+          message: 'Credential uploaded.',
+          credentialId: 10,
+          email: 'hidden-user@icloud.com',
+        }),
+      };
+    },
+    getState: async () => ({ ...liveState }),
+    markCurrentRegistrationAccountUsed: async (state, options) => {
+      markUsedCalls.push({ state, options });
+    },
+    setState: async (updates = {}) => {
+      liveState = { ...liveState, ...updates };
+    },
+  });
+
+  await publisher.executeKiroUploadCredential({ nodeId: 'kiro-upload-credential' });
+
+  assert.equal(markUsedCalls.length, 1);
+  assert.equal(markUsedCalls[0].state.email, 'hidden-user@icloud.com');
+  assert.equal(markUsedCalls[0].state.emailGenerator, 'icloud');
+  assert.equal(markUsedCalls[0].state.autoDeleteUsedIcloudAlias, true);
+  assert.equal(getKiroRuntime(markUsedCalls[0].state).upload.status, 'uploaded');
+  assert.equal(markUsedCalls[0].options.logPrefix, 'Kiro 注册成功');
+});
+
 test('kiro publisher routes step 9 through public contribution upload when contribution mode is enabled', async () => {
   const api = loadPublisherApi();
   const requests = [];

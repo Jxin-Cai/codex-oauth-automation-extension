@@ -315,6 +315,7 @@
       completeNodeFromBackground,
       fetchImpl = typeof fetch === 'function' ? fetch.bind(globalThis) : null,
       getState = async () => ({}),
+      markCurrentRegistrationAccountUsed = null,
       maybeSubmitFlowContribution = async () => ({ ok: true, skipped: true, reason: 'not_configured' }),
       setState = async () => {},
     } = deps;
@@ -334,6 +335,19 @@
       const nextPatch = mergeRuntimePatch(currentState, patch);
       await setState(nextPatch);
       return nextPatch;
+    }
+
+    async function markRegistrationAccountUsedAfterUpload(currentState = {}, payload = {}) {
+      if (typeof markCurrentRegistrationAccountUsed !== 'function') {
+        return;
+      }
+      await markCurrentRegistrationAccountUsed({
+        ...currentState,
+        ...payload,
+      }, {
+        logPrefix: 'Kiro 注册成功',
+        level: 'ok',
+      });
     }
 
     async function persistFailure(currentState = {}, message = '') {
@@ -398,6 +412,7 @@
               lastUploadedAt: uploadedAt,
             },
           });
+          await markRegistrationAccountUsedAfterUpload(currentState, payload);
           await log(`步骤 9：贡献上传完成，状态：${contributionResult.message || '贡献上传成功'}`, 'ok', nodeId);
           await completeNodeFromBackground(nodeId, payload);
           return;
@@ -465,6 +480,7 @@
             lastUploadedAt: uploadedAt,
           },
         });
+        await markRegistrationAccountUsedAfterUpload(currentState, payload);
         await log(`步骤 9：kiro.rs 上传完成，状态：${uploadResult.message || '上传成功'}`, 'ok', nodeId);
         await completeNodeFromBackground(nodeId, payload);
       } catch (error) {

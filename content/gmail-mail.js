@@ -102,6 +102,35 @@ function normalizeRulePatternList(patterns = []) {
   return Array.isArray(patterns) ? patterns : [];
 }
 
+function findLastRegexCandidate(text, regex) {
+  const normalizedText = String(text || '');
+  const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
+  const matcher = new RegExp(regex.source, flags);
+  let lastCandidate = null;
+  let match;
+
+  while ((match = matcher.exec(normalizedText)) !== null) {
+    let currentCandidate = null;
+    for (let index = 1; index < match.length; index += 1) {
+      const candidate = String(match[index] || '').trim();
+      if (candidate) {
+        currentCandidate = candidate;
+      }
+    }
+    if (!currentCandidate && String(match[0] || '').trim()) {
+      currentCandidate = String(match[0] || '').trim();
+    }
+    if (currentCandidate) {
+      lastCandidate = currentCandidate;
+    }
+    if (match[0] === '') {
+      matcher.lastIndex += 1;
+    }
+  }
+
+  return lastCandidate;
+}
+
 function extractCodeByRulePatterns(text, patterns = []) {
   const normalizedText = String(text || '');
   for (const pattern of normalizeRulePatternList(patterns)) {
@@ -111,18 +140,9 @@ function extractCodeByRulePatterns(text, patterns = []) {
         continue;
       }
       const flags = String(pattern?.flags || '').replace(/[^dgimsuvy]/g, '');
-      const match = normalizedText.match(new RegExp(source, flags));
-      if (!match) {
-        continue;
-      }
-      for (let index = 1; index < match.length; index += 1) {
-        const candidate = String(match[index] || '').trim();
-        if (candidate) {
-          return candidate;
-        }
-      }
-      if (String(match[0] || '').trim()) {
-        return String(match[0] || '').trim();
+      const candidate = findLastRegexCandidate(normalizedText, new RegExp(source, flags));
+      if (candidate) {
+        return candidate;
       }
     } catch (_) {
       // Ignore invalid runtime rule patterns and continue with other candidates.
@@ -205,14 +225,14 @@ function extractVerificationCode(text, options = {}) {
     return matchedByRule;
   }
 
-  const cnMatch = normalized.match(/(?:验证码|代码)[^0-9]{0,16}(\d{6})/i);
-  if (cnMatch) return cnMatch[1];
+  const cnMatch = findLastRegexCandidate(normalized, /(?:验证码|代码)[^0-9]{0,16}(\d{6})/i);
+  if (cnMatch) return cnMatch;
 
-  const enMatch = normalized.match(/(?:verification\s+code|temporary\s+verification\s+code|log-?in\s+code|enter\s+this\s+code|code(?:\s+is)?)[^0-9]{0,24}(\d{6})/i);
-  if (enMatch) return enMatch[1];
+  const enMatch = findLastRegexCandidate(normalized, /(?:verification\s+code|temporary\s+verification\s+code|log-?in\s+code|enter\s+this\s+code|code(?:\s+is)?)[^0-9]{0,24}(\d{6})/i);
+  if (enMatch) return enMatch;
 
-  const plainMatch = normalized.match(/\b(\d{6})\b/);
-  if (plainMatch) return plainMatch[1];
+  const plainMatch = findLastRegexCandidate(normalized, /\b(\d{6})\b/);
+  if (plainMatch) return plainMatch;
 
   return null;
 }

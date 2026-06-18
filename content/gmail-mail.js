@@ -597,6 +597,35 @@ async function openRowAndGetMessageText(row) {
   return text;
 }
 
+function sortGmailCandidatesByRecency(candidates = []) {
+  return [...candidates].sort((left, right) => {
+    const leftTime = Number(left?.rowTimestamp) || 0;
+    const rightTime = Number(right?.rowTimestamp) || 0;
+    if (leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+
+    const leftCategoryIndex = Number(left?.categoryIndex) || 0;
+    const rightCategoryIndex = Number(right?.categoryIndex) || 0;
+    if (leftCategoryIndex !== rightCategoryIndex) {
+      return leftCategoryIndex - rightCategoryIndex;
+    }
+
+    return (Number(left?.rowIndex) || 0) - (Number(right?.rowIndex) || 0);
+  });
+}
+
+async function openCandidateAndGetMessageText(step, candidate) {
+  const activeCategory = candidate?.activeCategory || {};
+  if (activeCategory.key) {
+    await activateCategoryTab(step, activeCategory.key);
+  }
+
+  const rows = collectThreadRows();
+  const refreshedRow = rows.find((row, index) => getRowFingerprint(row, index) === candidate.rowId);
+  return openRowAndGetMessageText(refreshedRow || candidate.row);
+}
+
 async function handlePollEmail(step, payload) {
   const {
     codePatterns = [],
@@ -646,12 +675,15 @@ async function handlePollEmail(step, payload) {
 
     const useFallback = attempt > GMAIL_FALLBACK_AFTER;
 
-    for (const category of categoryOrder) {
+    const candidates = [];
+
+    for (let categoryIndex = 0; categoryIndex < categoryOrder.length; categoryIndex += 1) {
+      const category = categoryOrder[categoryIndex];
       const activeCategory = await activateCategoryTab(step, category.key);
       const rows = collectThreadRows();
       const existingMailIds = existingMailIdsByCategory.get(activeCategory.key) || new Set();
 
-      for (let index = 0; index < rows.length; index++) {
+      for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index];
         const rowId = getRowFingerprint(row, index);
         const rowTimestamp = getRowTimestamp(row);
@@ -672,62 +704,76 @@ async function handlePollEmail(step, payload) {
           continue;
         }
 
-        const previewTargetState = getTargetEmailMatchState(preview.combinedText, targetEmail);
-        const previewCode = extractVerificationCode(preview.combinedText, {
-          codePatterns,
+        candidates.push({
+          activeCategory,
+          categoryIndex,
+          existingMailIds,
+          preview,
+          row,
+          rowId,
+          rowIndex: index,
+          rowTimestamp,
         });
-        if (previewCode) {
-          if (excludedCodeSet.has(previewCode)) {
-            log(`步骤 ${step}：跳过排除的验证码：${previewCode}`, 'info');
-            continue;
-          }
-          if (seenCodes.has(previewCode)) {
-            log(`步骤 ${step}：跳过已处理过的验证码：${previewCode}`, 'info');
-            continue;
-          }
-          seenCodes.add(previewCode);
-          persistSeenCodes();
-          const source = useFallback && existingMailIds.has(rowId) ? '回退匹配邮件' : '新邮件';
-          const timeLabel = rowTimestamp ? `，时间：${new Date(rowTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
-          const targetLabel = previewTargetState.matches ? '，目标邮箱命中' : '';
-          log(`步骤 ${step}：已在 Gmail ${activeCategory.label} 分类找到验证码：${previewCode}（来源：${source}${timeLabel}${targetLabel}）`, 'ok');
-          return {
-            ok: true,
-            code: previewCode,
-            emailTimestamp: Date.now(),
-            mailId: rowId,
-          };
-        }
+      }
+    }
 
-        const openedText = await openRowAndGetMessageText(row);
-        const openedTargetState = getTargetEmailMatchState(openedText, targetEmail);
-        const bodyCode = extractVerificationCode(openedText, {
-          codePatterns,
-        });
-        if (!bodyCode) {
+    for (const candidate of sortGmailCandidatesByRecency(candidates)) {
+      const { activeCategory, existingMailIds, preview, row, rowId, rowTimestamp } = candidate;
+      const previewTargetState = getTargetEmailMatchState(preview.combinedText, targetEmail);
+      const previewCode = extractVerificationCode(preview.combinedText, {
+        codePatterns,
+      });
+      if (previewCode) {
+        if (excludedCodeSet.has(previewCode)) {
+          log(`步骤 ${step}：跳过排除的验证码：${previewCode}`, 'info');
           continue;
         }
-        if (excludedCodeSet.has(bodyCode)) {
-          log(`步骤 ${step}：跳过排除的验证码：${bodyCode}`, 'info');
+        if (seenCodes.has(previewCode)) {
+          log(`步骤 ${step}：跳过已处理过的验证码：${previewCode}`, 'info');
           continue;
         }
-        if (seenCodes.has(bodyCode)) {
-          log(`步骤 ${step}：跳过已处理过的验证码：${bodyCode}`, 'info');
-          continue;
-        }
-        seenCodes.add(bodyCode);
+        seenCodes.add(previewCode);
         persistSeenCodes();
-        const source = useFallback && existingMailIds.has(rowId) ? '回退匹配邮件正文' : '新邮件正文';
+        const source = useFallback && existingMailIds.has(rowId) ? '回退匹配邮件' : '新邮件';
         const timeLabel = rowTimestamp ? `，时间：${new Date(rowTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
-        const targetLabel = openedTargetState.matches ? '，目标邮箱命中' : '';
-        log(`步骤 ${step}：已在 Gmail ${activeCategory.label} 分类正文中找到验证码：${bodyCode}（来源：${source}${timeLabel}${targetLabel}）`, 'ok');
+        const targetLabel = previewTargetState.matches ? '，目标邮箱命中' : '';
+        log(`步骤 ${step}：已在 Gmail ${activeCategory.label} 分类最新邮件找到验证码：${previewCode}（来源：${source}${timeLabel}${targetLabel}）`, 'ok');
         return {
           ok: true,
-          code: bodyCode,
+          code: previewCode,
           emailTimestamp: Date.now(),
           mailId: rowId,
         };
       }
+
+      const openedText = await openCandidateAndGetMessageText(step, candidate);
+      const openedTargetState = getTargetEmailMatchState(openedText, targetEmail);
+      const bodyCode = extractVerificationCode(openedText, {
+        codePatterns,
+      });
+      if (!bodyCode) {
+        continue;
+      }
+      if (excludedCodeSet.has(bodyCode)) {
+        log(`步骤 ${step}：跳过排除的验证码：${bodyCode}`, 'info');
+        continue;
+      }
+      if (seenCodes.has(bodyCode)) {
+        log(`步骤 ${step}：跳过已处理过的验证码：${bodyCode}`, 'info');
+        continue;
+      }
+      seenCodes.add(bodyCode);
+      persistSeenCodes();
+      const source = useFallback && existingMailIds.has(rowId) ? '回退匹配邮件正文' : '新邮件正文';
+      const timeLabel = rowTimestamp ? `，时间：${new Date(rowTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
+      const targetLabel = openedTargetState.matches ? '，目标邮箱命中' : '';
+      log(`步骤 ${step}：已在 Gmail ${activeCategory.label} 分类最新邮件正文中找到验证码：${bodyCode}（来源：${source}${timeLabel}${targetLabel}）`, 'ok');
+      return {
+        ok: true,
+        code: bodyCode,
+        emailTimestamp: Date.now(),
+        mailId: rowId,
+      };
     }
 
     if (attempt === GMAIL_FALLBACK_AFTER + 1) {

@@ -57,11 +57,12 @@ function createApi() {
     extractFunction('findLastRegexCandidate'),
     extractFunction('extractCodeByRulePatterns'),
     extractFunction('extractVerificationCode'),
+    extractFunction('sortGmailCandidatesByRecency'),
   ].join('\n');
 
   return new Function(`
 ${bundle}
-return { extractVerificationCode };
+return { extractVerificationCode, sortGmailCandidatesByRecency };
 `)();
 }
 
@@ -86,4 +87,18 @@ test('gmail extractVerificationCode returns the last generic six-digit code', ()
   const api = createApi();
 
   assert.equal(api.extractVerificationCode('old code 123456, latest code 654321'), '654321');
+});
+
+test('gmail candidates are sorted by newest received time before row order', () => {
+  const api = createApi();
+  const sorted = api.sortGmailCandidatesByRecency([
+    { rowId: 'older-first-row', rowTimestamp: 1710000000000, categoryIndex: 0, rowIndex: 0 },
+    { rowId: 'newer-second-row', rowTimestamp: 1710000600000, categoryIndex: 0, rowIndex: 1 },
+    { rowId: 'same-time-first-row', rowTimestamp: 1710000600000, categoryIndex: 0, rowIndex: 0 },
+  ]);
+
+  assert.deepEqual(
+    sorted.map((candidate) => candidate.rowId),
+    ['same-time-first-row', 'newer-second-row', 'older-first-row']
+  );
 });

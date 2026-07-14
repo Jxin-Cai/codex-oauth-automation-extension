@@ -3875,6 +3875,7 @@ function buildSettingsStatePatchFromFlatUpdates(updates = {}) {
   };
 
   assignIfUpdated('activeFlowId', ['activeFlowId']);
+  assignIfUpdated('uiLanguage', ['ui', 'language']);
   if (hasUpdate('selectedTargetId') || hasUpdate('targetId')) {
     const flowId = normalizePatchFlowId(
       updates.activeFlowId ?? updates.flowId,

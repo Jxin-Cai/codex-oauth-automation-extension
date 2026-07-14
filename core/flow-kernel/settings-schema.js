@@ -610,9 +610,9 @@
         activeFlowId,
         ui: {
           language: rootScope.FlowPilotI18n?.normalizeLanguageSetting
-            ? rootScope.FlowPilotI18n.normalizeLanguageSetting(nested?.ui?.language ?? input?.uiLanguage ?? defaults.ui.language)
-            : (['auto', 'zh-CN', 'en-US'].includes(String(nested?.ui?.language ?? input?.uiLanguage ?? '').trim())
-              ? String(nested?.ui?.language ?? input?.uiLanguage).trim()
+            ? rootScope.FlowPilotI18n.normalizeLanguageSetting(input?.uiLanguage ?? nested?.ui?.language ?? defaults.ui.language)
+            : (['auto', 'zh-CN', 'en-US'].includes(String(input?.uiLanguage ?? nested?.ui?.language ?? '').trim())
+              ? String(input?.uiLanguage ?? nested?.ui?.language).trim()
               : defaults.ui.language),
         },
         services: {
@@ -681,10 +681,9 @@
 
     function mergeSettingsState(baseValue = {}, patchValue = {}) {
       const baseSettingsState = normalizeSettingsState(baseValue);
-      const patchSettingsState = normalizeSettingsState({
-        settingsState: patchValue,
-        activeFlowId: patchValue?.activeFlowId ?? baseSettingsState.activeFlowId,
-      });
+      const patchSettingsState = isPlainObject(patchValue)
+        ? patchValue
+        : {};
 
       return normalizeSettingsState({
         settingsState: mergePlainObjects(baseSettingsState, patchSettingsState),

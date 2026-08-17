@@ -10,6 +10,9 @@
   const GROK_PROFILE_SUBMIT_COMMAND_TIMEOUT_MS = 150 * 1000;
   const GROK_PRE_SSO_EXTRACT_WAIT_MS = 10 * 1000;
   const MAIL_2925_FILTER_LOOKBACK_MS = 10 * 60 * 1000;
+  const GROK_MAX_EMAIL_ATTEMPTS = 3;
+  const GROK_MAX_RESEND_ATTEMPTS = 2;
+  const GROK_SSO_EXTRACT_DEADLINE_MS = 5 * 60 * 1000;
   const GROK_COOKIE_CLEAR_DOMAINS = Object.freeze([
     'x.ai',
     'accounts.x.ai',
@@ -419,35 +422,75 @@
         const tabId = await ensureGrokRegisterTab(currentState, { openIfMissing: false });
         await activateTab(tabId);
         await ensureContentReady(tabId);
-        const resolvedEmail = await resolveSignupEmailForFlow(currentState, {
-          preserveAccountIdentity: true,
-        });
-        const email = cleanString(resolvedEmail).toLowerCase();
-        if (!email) {
-          throw new Error('Grok 注册邮箱为空，无法继续执行。');
+
+        let email = '';
+        let result = null;
+        let lastRejectionError = '';
+        const excludedEmails = [];
+
+        for (let attempt = 0; attempt < GROK_MAX_EMAIL_ATTEMPTS; attempt += 1) {
+          throwIfStopped();
+          const resolveOptions = attempt === 0
+            ? { preserveAccountIdentity: true }
+            : { forceFresh: true, excludeEmails: excludedEmails };
+          const resolvedEmail = await resolveSignupEmailForFlow(currentState, resolveOptions);
+          email = cleanString(resolvedEmail).toLowerCase();
+          if (!email) {
+            throw new Error('Grok 注册邮箱为空，无法继续执行。');
+          }
+          const requestedAt = Date.now();
+          await persistState({
+            grokEmail: email,
+            email,
+            accountIdentifierType: 'email',
+            accountIdentifier: email,
+            ...buildGrokRuntimePatch({
+              register: {
+                email,
+                verificationRequestedAt: requestedAt,
+                status: 'email_submitting',
+              },
+            }),
+          });
+          try {
+            result = await sendGrokCommand(nodeId, { email }, {
+              step: 2,
+              timeoutMs: GROK_VERIFICATION_READY_TIMEOUT_MS + 15000,
+              logMessage: `步骤 2：正在提交 Grok 注册邮箱（第 ${attempt + 1} 次）...`,
+            });
+            lastRejectionError = '';
+            break;
+          } catch (submitError) {
+            const submitMsg = getErrorMessage(submitError);
+            const isRejection = /rejected|different email|域名|被拒绝|不可用|不支持/i.test(submitMsg);
+            if (!isRejection || attempt >= GROK_MAX_EMAIL_ATTEMPTS - 1) {
+              throw submitError;
+            }
+            lastRejectionError = submitMsg;
+            excludedEmails.push(email);
+            await log(`步骤 2：邮箱 ${email} 被拒绝（${submitMsg}），尝试更换邮箱...`, 'warn', nodeId);
+            // Re-navigate to signup and wait for email_entry state
+            await ensureContentReady(tabId);
+            const pageState = await getGrokRegisterPageState({ step: 2 });
+            if (pageState?.state !== 'email_entry') {
+              // Navigate back to signup page
+              await sendGrokCommand('grok-open-signup-page', {}, {
+                step: 2,
+                timeoutMs: DEFAULT_GROK_PAGE_TIMEOUT_MS,
+                logMessage: '步骤 2：正在重新打开注册页...',
+              });
+              await ensureContentReady(tabId);
+            }
+          }
         }
-        const requestedAt = Date.now();
-        await persistState({
-          grokEmail: email,
-          email,
-          accountIdentifierType: 'email',
-          accountIdentifier: email,
-          ...buildGrokRuntimePatch({
-            register: {
-              email,
-              verificationRequestedAt: requestedAt,
-              status: 'email_submitting',
-            },
-          }),
-        });
-        const result = await sendGrokCommand(nodeId, { email }, {
-          step: 2,
-          timeoutMs: GROK_VERIFICATION_READY_TIMEOUT_MS + 15000,
-          logMessage: '步骤 2：正在提交 Grok 注册邮箱...',
-        });
+
+        if (!result) {
+          throw new Error(lastRejectionError || 'Grok 邮箱提交失败，已达到最大尝试次数。');
+        }
         if (result.state !== GROK_VERIFICATION_PAGE_STATE) {
           throw new Error(`Grok 邮箱提交后尚未进入验证码页面，当前状态：${cleanString(result.state) || 'unknown'}${cleanString(result.url) ? `，URL：${cleanString(result.url)}` : ''}。`);
         }
+        const requestedAt = Date.now();
         await log(`步骤 2：已提交 Grok 注册邮箱 ${email}。`, 'ok', nodeId);
         await completeNode(nodeId, {
           grokEmail: email,
@@ -499,7 +542,7 @@
             || currentState.runtimeState?.flowState?.grok?.register?.verificationRequestedAt
           ) || Date.now()
         );
-        const filterAfterTimestamp = cleanString(currentState?.mailProvider).toLowerCase() === '2925'
+        let filterAfterTimestamp = cleanString(currentState?.mailProvider).toLowerCase() === '2925'
           ? Math.max(0, requestedAt - MAIL_2925_FILTER_LOOKBACK_MS)
           : requestedAt;
         const email = cleanString(
@@ -524,25 +567,56 @@
             },
           }),
         });
-        const pollResult = await pollFlowVerificationCode({
-          actionLabel: 'Grok 验证码',
-          filterAfterTimestamp,
-          flowId: 'grok',
-          logStep: 3,
-          logStepKey: nodeId,
-          nodeId,
-          notFoundMessage: '步骤 3：邮箱轮询结束，但未获取到 xAI 验证码。',
-          state: {
-            ...currentState,
-            activeFlowId: 'grok',
-            flowId: 'grok',
-            visibleStep: 3,
-            grokEmail: email,
-            email,
-          },
-          step: 3,
-        });
-        const code = normalizeGrokVerificationCode(pollResult?.code);
+
+        let code = '';
+        let pollResult = null;
+        for (let resendAttempt = 0; resendAttempt <= GROK_MAX_RESEND_ATTEMPTS; resendAttempt += 1) {
+          throwIfStopped();
+          try {
+            pollResult = await pollFlowVerificationCode({
+              actionLabel: 'Grok 验证码',
+              filterAfterTimestamp,
+              flowId: 'grok',
+              logStep: 3,
+              logStepKey: nodeId,
+              nodeId,
+              notFoundMessage: '步骤 3：邮箱轮询结束，但未获取到 xAI 验证码。',
+              state: {
+                ...currentState,
+                activeFlowId: 'grok',
+                flowId: 'grok',
+                visibleStep: 3,
+                grokEmail: email,
+                email,
+              },
+              step: 3,
+            });
+            code = normalizeGrokVerificationCode(pollResult?.code);
+            if (code) break;
+          } catch (pollError) {
+            // Only attempt resend if we haven't exceeded max attempts
+            if (resendAttempt >= GROK_MAX_RESEND_ATTEMPTS) {
+              throw pollError;
+            }
+          }
+          // If no code and we can still resend, trigger resend
+          if (!code && resendAttempt < GROK_MAX_RESEND_ATTEMPTS) {
+            // Confirm we're still on verification page
+            const pageCheck = await getGrokRegisterPageState({ step: 3 });
+            if (pageCheck?.state !== GROK_VERIFICATION_PAGE_STATE) {
+              throw new Error(`验证码重发前页面状态异常：${pageCheck?.state || 'unknown'}，无法继续。`);
+            }
+            await log(`步骤 3：验证码轮询超时，正在触发第 ${resendAttempt + 1} 次重发...`, 'warn', nodeId);
+            await sendGrokCommand('grok-resend-verification', {}, {
+              step: 3,
+              timeoutMs: 15000,
+              logMessage: '步骤 3：正在点击重发验证码...',
+            });
+            filterAfterTimestamp = Date.now();
+            await sleepWithStop(2000);
+          }
+        }
+
         if (!code) {
           throw new Error('未能获取到 xAI 邮箱验证码。');
         }
@@ -665,17 +739,44 @@
       try {
         const tabId = await ensureGrokRegisterTab(currentState, { openIfMissing: false });
         await activateTab(tabId);
-        await log(`步骤 5：等待 ${Math.floor(GROK_PRE_SSO_EXTRACT_WAIT_MS / 1000)} 秒后提取 Grok SSO...`, 'info', nodeId);
-        await sleepWithStop(GROK_PRE_SSO_EXTRACT_WAIT_MS);
+        await log('步骤 5：开始等待 Grok SSO Cookie 出现...', 'info', nodeId);
 
-        let ssoCookie = await readSsoCookieFromChrome();
+        const deadline = Date.now() + GROK_SSO_EXTRACT_DEADLINE_MS;
+        const CHECK_INTERVAL_MS = 5000;
+        const PAGE_CHECK_INTERVAL_MS = 30000;
+        let ssoCookie = '';
+        let lastPageCheckAt = Date.now();
+
+        while (Date.now() < deadline) {
+          throwIfStopped();
+          ssoCookie = await readSsoCookieFromChrome();
+          if (ssoCookie) break;
+
+          // Every 30s confirm the page is still reachable
+          if (Date.now() - lastPageCheckAt >= PAGE_CHECK_INTERVAL_MS) {
+            try {
+              await ensureContentReady(tabId, { timeoutMs: 15000 });
+            } catch (_pageError) {
+              await log('步骤 5：页面连接丢失，尝试重新连接...', 'warn', nodeId);
+            }
+            lastPageCheckAt = Date.now();
+          }
+
+          await sleepWithStop(Math.min(CHECK_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+        }
+
         if (!ssoCookie) {
-          await ensureContentReady(tabId);
-          const result = await sendGrokCommand(nodeId, {}, {
-            step: 5,
-            logMessage: '步骤 5：正在从 Grok 注册页读取 sso Cookie...',
-          });
-          ssoCookie = cleanString(result?.ssoCookie);
+          // Final attempt via content script
+          try {
+            await ensureContentReady(tabId);
+            const result = await sendGrokCommand(nodeId, {}, {
+              step: 5,
+              logMessage: '步骤 5：正在从 Grok 注册页读取 sso Cookie...',
+            });
+            ssoCookie = cleanString(result?.ssoCookie);
+          } catch (_finalError) {
+            // Ignore - will throw below if still empty
+          }
         }
         if (!ssoCookie) {
           throw new Error('未找到 x.ai/grok sso Cookie。');
@@ -751,11 +852,14 @@
   return {
     DEFAULT_GROK_PAGE_TIMEOUT_MS,
     GROK_COOKIE_CLEAR_DOMAINS,
+    GROK_MAX_EMAIL_ATTEMPTS,
+    GROK_MAX_RESEND_ATTEMPTS,
     GROK_POST_PROFILE_CF_WAIT_MS,
     GROK_PROFILE_SUBMIT_COMMAND_TIMEOUT_MS,
     GROK_PRE_SSO_EXTRACT_WAIT_MS,
     GROK_REGISTER_PAGE_SOURCE_ID,
     GROK_SIGNUP_URL,
+    GROK_SSO_EXTRACT_DEADLINE_MS,
     createGrokRegisterRunner,
   };
 });

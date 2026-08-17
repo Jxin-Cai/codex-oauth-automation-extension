@@ -124,7 +124,7 @@ test('flow capability registry exposes Grok as an independent SSO flow without O
   assert.equal(capabilityState.canShowLuckmail, false);
   assert.equal(capabilityState.effectiveSignupMethod, 'email');
   assert.equal(capabilityState.effectiveTargetId, 'webchat2api');
-  assert.deepEqual(capabilityState.supportedTargetIds, ['webchat2api']);
+  assert.deepEqual(capabilityState.supportedTargetIds, ['webchat2api', 'grok2api']);
   assert.deepEqual(capabilityState.flowCapabilities.contributionAdapterIds, []);
   assert.deepEqual(
     capabilityState.visibleGroupIds,

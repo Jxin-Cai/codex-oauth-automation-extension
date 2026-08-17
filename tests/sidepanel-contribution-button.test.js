@@ -13,7 +13,7 @@ test('sidepanel html keeps a single contribution mode button in header', () => {
 
   assert.equal(matches.length, 1);
   assert.match(html, /id="btn-contribution-mode"[^>]*title="进入贡献模式并打开官网页"/);
-  assert.match(html, />贡献\/使用教程<\/button>/);
+  assert.match(html, />贡献\/使用<\/button>/);
   assert.notEqual(headerEndIndex, -1);
   assert.notEqual(adBarIndex, -1);
   assert.notEqual(contributionLayerIndex, -1);

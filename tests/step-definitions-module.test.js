@@ -236,6 +236,18 @@ test('step definitions module exposes ordered normal and Plus step metadata', ()
       'grok-upload-sso-to-webchat2api',
     ]
   );
+  const grok2ApiSteps = api.getSteps({ activeFlowId: 'grok', targetId: 'grok2api' });
+  assert.deepStrictEqual(
+    grok2ApiSteps.map((step) => step.key),
+    [
+      'grok-open-signup-page',
+      'grok-submit-email',
+      'grok-submit-verification-code',
+      'grok-submit-profile',
+      'grok-extract-sso-cookie',
+      'grok-upload-sso-to-grok2api',
+    ]
+  );
   assert.equal(grokSteps.every((step) => step.flowId === 'grok'), true);
   assert.equal(grokSteps[0].driverId, 'flows/grok/background/register-runner');
   assert.equal(grokSteps[0].sourceId, 'grok-register-page');

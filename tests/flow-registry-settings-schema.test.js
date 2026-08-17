@@ -66,7 +66,7 @@ test('flow registry exposes canonical flow and target metadata', () => {
   );
   assert.deepEqual(
     flowRegistry.getTargetOptions('grok').map((entry) => entry.id),
-    ['webchat2api']
+    ['webchat2api', 'grok2api']
   );
   assert.equal(
     flowRegistry.getTargetCapabilities('openai', 'webchat')?.supportsPhoneSignup,
@@ -92,7 +92,7 @@ test('flow registry exposes canonical flow and target metadata', () => {
   assert.equal(flowRegistry.getFlowCapabilities('openai').supportsAccountContribution, true);
   assert.equal(flowRegistry.getFlowCapabilities('kiro').supportsAccountContribution, true);
   assert.equal(flowRegistry.getFlowCapabilities('grok').supportsAccountContribution, false);
-  assert.deepEqual(flowRegistry.getFlowCapabilities('grok').supportedTargetIds, ['webchat2api']);
+  assert.deepEqual(flowRegistry.getFlowCapabilities('grok').supportedTargetIds, ['webchat2api', 'grok2api']);
   assert.deepEqual(
     flowRegistry.getFlowCapabilities('openai').contributionAdapterIds,
     ['openai-oauth', 'openai-codex-file', 'openai-sub2api-file']
@@ -189,6 +189,30 @@ test('settings schema shares webchat connection config between OpenAI and Grok t
   assert.equal(fromOpenAiNested.flows.grok.targets.webchat2api.baseUrl, 'https://nested-openai.example.com/admin');
   assert.equal(fromOpenAiNested.flows.openai.targets.webchat.apiKey, 'nested-openai-key');
   assert.equal(fromOpenAiNested.flows.grok.targets.webchat2api.apiKey, 'nested-openai-key');
+});
+
+test('settings schema keeps Grok2API credentials independent from shared webchat config', () => {
+  const { settingsSchema } = loadApis();
+  const schema = settingsSchema.createSettingsSchema();
+
+  const normalized = schema.normalizeSettingsState({
+    activeFlowId: 'grok',
+    grokWebchat2ApiUrl: 'https://shared.example.com/admin',
+    grokWebchat2ApiAdminKey: 'shared-key',
+    grok2ApiUrl: 'https://grok2api.example.com',
+    grok2ApiUsername: 'admin',
+    grok2ApiPassword: 'secret-pass',
+  });
+
+  assert.equal(normalized.flows.grok.targets.webchat2api.baseUrl, 'https://shared.example.com/admin');
+  assert.equal(normalized.flows.grok.targets.grok2api.baseUrl, 'https://grok2api.example.com');
+  assert.equal(normalized.flows.grok.targets.grok2api.username, 'admin');
+  assert.equal(normalized.flows.grok.targets.grok2api.password, 'secret-pass');
+
+  const view = schema.buildSettingsView(normalized);
+  assert.equal(view.grok2ApiUrl, 'https://grok2api.example.com');
+  assert.equal(view.grok2ApiUsername, 'admin');
+  assert.equal(view.grok2ApiPassword, 'secret-pass');
 });
 
 test('settings schema lets explicit flat step range override stale canonical range', () => {

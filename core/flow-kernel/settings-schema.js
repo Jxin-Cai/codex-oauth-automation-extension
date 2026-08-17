@@ -342,6 +342,14 @@
           apiKey: String(targetState.apiKey ?? ''),
         };
       }
+      if (flowId === 'grok' && targetId === 'grok2api') {
+        return {
+          ...targetState,
+          baseUrl: String(targetState.baseUrl ?? '').trim(),
+          username: String(targetState.username ?? '').trim(),
+          password: String(targetState.password ?? ''),
+        };
+      }
       return targetState;
     }
 
@@ -584,11 +592,24 @@
         baseUrl: sharedWebchatConfig.baseUrl,
         apiKey: sharedWebchatConfig.apiKey,
       };
+      const grok2ApiSource = {
+        ...currentFlow.targets.grok2api,
+        ...getTargetValue(
+          nested,
+          (state) => state.flows?.grok?.targets?.grok2api,
+          null,
+          {}
+        ),
+        baseUrl: input?.grok2ApiUrl ?? currentFlow.targets.grok2api?.baseUrl,
+        username: input?.grok2ApiUsername ?? currentFlow.targets.grok2api?.username,
+        password: input?.grok2ApiPassword ?? currentFlow.targets.grok2api?.password,
+      };
       return {
         ...currentFlow,
         targets: {
           ...currentFlow.targets,
           webchat2api: normalizeFlowTargetState('grok', 'webchat2api', targetSource, defaultGrokTargets.webchat2api || {}),
+          grok2api: normalizeFlowTargetState('grok', 'grok2api', grok2ApiSource, defaultGrokTargets.grok2api || {}),
         },
       };
     }
@@ -778,6 +799,9 @@
       next.kiroRsKey = kiroState.targets['kiro-rs']?.apiKey || '';
       next.grokWebchat2ApiUrl = grokState.targets.webchat2api?.baseUrl || '';
       next.grokWebchat2ApiAdminKey = grokState.targets.webchat2api?.apiKey || '';
+      next.grok2ApiUrl = grokState.targets.grok2api?.baseUrl || '';
+      next.grok2ApiUsername = grokState.targets.grok2api?.username || '';
+      next.grok2ApiPassword = grokState.targets.grok2api?.password || '';
       next.stepExecutionRangeByFlow = buildStepExecutionRangeByFlow(normalizedState);
       next.settingsSchemaVersion = normalizedState.schemaVersion;
       next.settingsState = cloneValue(normalizedState);

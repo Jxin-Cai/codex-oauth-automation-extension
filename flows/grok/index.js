@@ -28,7 +28,7 @@
       supportsAccountContribution: false,
       supportsOpenAiOAuthContribution: false,
       contributionAdapterIds: [],
-      supportedTargetIds: ['webchat2api'],
+      supportedTargetIds: ['webchat2api', 'grok2api'],
       supportsLuckmail: false,
       canSwitchFlow: true,
       stepDefinitionMode: 'grok',
@@ -45,6 +45,18 @@
         defaultState: {
           baseUrl: '',
           apiKey: '',
+        },
+      },
+      grok2api: {
+        id: 'grok2api',
+        label: 'Grok2API',
+        groups: [
+          'grok-target-grok2api',
+        ],
+        defaultState: {
+          baseUrl: '',
+          username: '',
+          password: '',
         },
       },
     },
@@ -115,6 +127,12 @@
           'grok-upload-sso-to-webchat2api',
         ],
       },
+      'flows/grok/background/publisher-grok2api': {
+        sourceId: 'grok-grok2api',
+        commands: [
+          'grok-upload-sso-to-grok2api',
+        ],
+      },
     },
     defaultTargetId: 'webchat2api',
     settingsDefaults: {
@@ -122,6 +140,11 @@
         webchat2api: {
           baseUrl: '',
           apiKey: '',
+        },
+        grok2api: {
+          baseUrl: '',
+          username: '',
+          password: '',
         },
       },
       autoRun: {
@@ -142,6 +165,16 @@
           'row-grok-sso-settings',
         ],
       },
+      'grok-target-grok2api': {
+        id: 'grok-target-grok2api',
+        label: 'Grok2API',
+        rowIds: [
+          'row-grok-grok2api-url',
+          'row-grok-grok2api-username',
+          'row-grok-grok2api-password',
+          'row-grok-sso-settings',
+        ],
+      },
       'grok-runtime-status': {
         id: 'grok-runtime-status',
         label: 'Grok 运行态',
@@ -149,6 +182,7 @@
           'row-grok-register-status',
           'row-grok-sso-status',
           'row-grok-webchat2api-upload-status',
+          'row-grok-grok2api-upload-status',
         ],
       },
     },

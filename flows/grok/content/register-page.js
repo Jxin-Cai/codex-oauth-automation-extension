@@ -353,6 +353,16 @@ async function submitGrokProfile(payload = {}) {
   };
 }
 
+async function resendGrokVerification() {
+  const resendPattern = /resend|重新发送|再次发送|重发/i;
+  const button = findGrokClickableByText(resendPattern);
+  if (!button) {
+    return { clicked: false, reason: 'not_found' };
+  }
+  simulateGrokClick(button);
+  return { clicked: true, clickedAt: Date.now() };
+}
+
 async function extractGrokSsoCookie() {
   const match = String(document.cookie || '').match(/(?:^|;\s*)sso=([^;]+)/);
   return {
@@ -375,6 +385,8 @@ async function executeGrokCommand(command, payload = {}) {
       return submitGrokProfile(payload);
     case 'grok-extract-sso-cookie':
       return extractGrokSsoCookie(payload);
+    case 'grok-resend-verification':
+      return resendGrokVerification(payload);
     case 'GET_PAGE_STATE':
       return { state: getGrokPageState(), url: location.href };
     default:

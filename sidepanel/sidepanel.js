@@ -189,6 +189,10 @@ const rowGrokWebchat2ApiUrl = document.getElementById('row-grok-webchat2api-url'
 const inputGrokWebchat2ApiUrl = document.getElementById('input-grok-webchat2api-url');
 const rowGrokWebchat2ApiKey = document.getElementById('row-grok-webchat2api-key');
 const inputGrokWebchat2ApiKey = document.getElementById('input-grok-webchat2api-key');
+const inputGrok2ApiUrl = document.getElementById('input-grok-grok2api-url');
+const inputGrok2ApiUsername = document.getElementById('input-grok-grok2api-username');
+const inputGrok2ApiPassword = document.getElementById('input-grok-grok2api-password');
+const displayGrok2ApiUploadStatus = document.getElementById('display-grok-grok2api-upload-status');
 const rowOpenAiWebchatUrl = document.getElementById('row-openai-webchat-url');
 const inputOpenAiWebchatUrl = document.getElementById('input-openai-webchat-url');
 const rowOpenAiWebchatKey = document.getElementById('row-openai-webchat-key');
@@ -3089,6 +3093,17 @@ function renderGrokRuntimeState(state = latestState) {
     displayGrokWebchat2ApiUploadStatus.textContent = `${label}${uploadMessage ? `：${uploadMessage}` : ''}${suffix}`;
     displayGrokWebchat2ApiUploadStatus.title = uploadTargetUrl || '';
   }
+  if (displayGrok2ApiUploadStatus) {
+    const grok2apiUploadState = runtimeState?.uploads?.grok2api || {};
+    const grok2apiStatus = String(grok2apiUploadState.status || state?.grok2ApiUploadStatus || '').trim();
+    const grok2apiUploadedAt = Number(grok2apiUploadState.uploadedAt || 0) || 0;
+    const grok2apiMessage = String(grok2apiUploadState.message || '').trim();
+    const grok2apiTargetUrl = String(grok2apiUploadState.targetUrl || '').trim();
+    const grok2apiLabel = getGrokWebchat2ApiUploadStatusLabel(grok2apiStatus);
+    const grok2apiSuffix = grok2apiUploadedAt ? `，${new Date(grok2apiUploadedAt).toLocaleString()}` : '';
+    displayGrok2ApiUploadStatus.textContent = `${grok2apiLabel}${grok2apiMessage ? `：${grok2apiMessage}` : ''}${grok2apiSuffix}`;
+    displayGrok2ApiUploadStatus.title = grok2apiTargetUrl || '';
+  }
   [btnCopyGrokSso, btnClearGrokSso].forEach((button) => {
     if (button) {
       button.disabled = cookies.length === 0;
@@ -5299,6 +5314,15 @@ function collectSettingsPayload() {
       ? currentKiroRsKeyValue
       : String(latestState?.kiroRsKey || '').trim(),
     ...createSharedWebchatConfigPatch(sharedWebchatUrl, sharedWebchatAdminKey),
+    grok2ApiUrl: typeof inputGrok2ApiUrl !== 'undefined' && inputGrok2ApiUrl
+      ? String(inputGrok2ApiUrl.value ?? '').trim()
+      : String(latestState?.grok2ApiUrl || '').trim(),
+    grok2ApiUsername: typeof inputGrok2ApiUsername !== 'undefined' && inputGrok2ApiUsername
+      ? String(inputGrok2ApiUsername.value ?? '').trim()
+      : String(latestState?.grok2ApiUsername || '').trim(),
+    grok2ApiPassword: typeof inputGrok2ApiPassword !== 'undefined' && inputGrok2ApiPassword
+      ? String(inputGrok2ApiPassword.value ?? '')
+      : String(latestState?.grok2ApiPassword ?? ''),
     openaiWebchatUploadEnabled: openAiWebchatUploadEnabled,
     vpsUrl: inputVpsUrl.value.trim(),
     vpsPassword: inputVpsPassword.value,
@@ -12133,6 +12157,15 @@ function applySettingsState(state) {
   if (typeof inputGrokWebchat2ApiKey !== 'undefined' && inputGrokWebchat2ApiKey) {
     inputGrokWebchat2ApiKey.value = String(getSharedWebchatAdminKeyFromState(state) || '');
   }
+  if (typeof inputGrok2ApiUrl !== 'undefined' && inputGrok2ApiUrl) {
+    inputGrok2ApiUrl.value = String(state?.grok2ApiUrl || '').trim();
+  }
+  if (typeof inputGrok2ApiUsername !== 'undefined' && inputGrok2ApiUsername) {
+    inputGrok2ApiUsername.value = String(state?.grok2ApiUsername || '').trim();
+  }
+  if (typeof inputGrok2ApiPassword !== 'undefined' && inputGrok2ApiPassword) {
+    inputGrok2ApiPassword.value = String(state?.grok2ApiPassword ?? '');
+  }
   if (typeof inputOpenAiWebchatUrl !== 'undefined' && inputOpenAiWebchatUrl) {
     inputOpenAiWebchatUrl.value = String(getSharedWebchatUrlFromState(state) || '').trim();
   }
@@ -16863,6 +16896,16 @@ selectPlusAccountAccessStrategy?.addEventListener('change', () => {
     syncSharedWebchatInputsFromState(latestState);
     renderOpenAiWebchatState(latestState);
     syncStepDefinitionsFromUiState(latestState);
+    markSettingsDirty(true);
+    scheduleSettingsAutoSave();
+  });
+  input?.addEventListener('blur', () => {
+    saveSettings({ silent: true }).catch(() => { });
+  });
+});
+
+[inputGrok2ApiUrl, inputGrok2ApiUsername, inputGrok2ApiPassword].forEach((input) => {
+  input?.addEventListener('input', () => {
     markSettingsDirty(true);
     scheduleSettingsAutoSave();
   });

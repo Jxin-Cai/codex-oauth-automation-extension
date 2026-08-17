@@ -83,6 +83,21 @@
     ));
   }
 
+  function normalizeUploadState(value = {}) {
+    const source = isPlainObject(value) ? value : {};
+    return {
+      status: cleanString(source.status),
+      uploadedAt: Math.max(0, normalizeInteger(source.uploadedAt)),
+      message: cleanString(source.message),
+      targetUrl: cleanString(source.targetUrl),
+    };
+  }
+
+  function hasMeaningfulUploadState(value = {}) {
+    const normalized = normalizeUploadState(value);
+    return Boolean(normalized.status || normalized.message || normalized.targetUrl || normalized.uploadedAt);
+  }
+
   function buildDefaultRuntimeState() {
     return {
       session: {
@@ -113,11 +128,31 @@
         message: '',
         targetUrl: '',
       },
+      uploads: {
+        webchat2api: {
+          status: '',
+          uploadedAt: 0,
+          message: '',
+          targetUrl: '',
+        },
+        grok2api: {
+          status: '',
+          uploadedAt: 0,
+          message: '',
+          targetUrl: '',
+        },
+      },
     };
   }
 
   function normalizeRuntimeState(runtimeState = {}) {
     const merged = deepMerge(buildDefaultRuntimeState(), runtimeState);
+    const webchatUpload = normalizeUploadState(
+      hasMeaningfulUploadState(merged.uploads?.webchat2api)
+        ? merged.uploads.webchat2api
+        : merged.upload
+    );
+    const grok2ApiUpload = normalizeUploadState(merged.uploads?.grok2api);
     return {
       session: {
         registerTabId: normalizeNullableInteger(merged.session?.registerTabId),
@@ -141,11 +176,10 @@
         cookies: normalizeSsoCookies(merged.sso?.cookies || merged.ssoCookies),
         extractedAt: Math.max(0, normalizeInteger(merged.sso?.extractedAt)),
       },
-      upload: {
-        status: cleanString(merged.upload?.status),
-        uploadedAt: Math.max(0, normalizeInteger(merged.upload?.uploadedAt)),
-        message: cleanString(merged.upload?.message),
-        targetUrl: cleanString(merged.upload?.targetUrl),
+      upload: webchatUpload,
+      uploads: {
+        webchat2api: webchatUpload,
+        grok2api: grok2ApiUpload,
       },
     };
   }
@@ -184,10 +218,14 @@
       grokSsoCookie: normalizedRuntimeState.sso.currentCookie,
       grokSsoCookies: normalizedRuntimeState.sso.cookies,
       grokSsoExtractedAt: normalizedRuntimeState.sso.extractedAt,
-      grokWebchat2ApiUploadStatus: normalizedRuntimeState.upload.status,
-      grokWebchat2ApiUploadedAt: normalizedRuntimeState.upload.uploadedAt,
-      grokWebchat2ApiUploadMessage: normalizedRuntimeState.upload.message,
-      grokWebchat2ApiTargetUrl: normalizedRuntimeState.upload.targetUrl,
+      grokWebchat2ApiUploadStatus: normalizedRuntimeState.uploads.webchat2api.status,
+      grokWebchat2ApiUploadedAt: normalizedRuntimeState.uploads.webchat2api.uploadedAt,
+      grokWebchat2ApiUploadMessage: normalizedRuntimeState.uploads.webchat2api.message,
+      grokWebchat2ApiTargetUrl: normalizedRuntimeState.uploads.webchat2api.targetUrl,
+      grok2ApiUploadStatus: normalizedRuntimeState.uploads.grok2api.status,
+      grok2ApiUploadedAt: normalizedRuntimeState.uploads.grok2api.uploadedAt,
+      grok2ApiUploadMessage: normalizedRuntimeState.uploads.grok2api.message,
+      grok2ApiTargetUrl: normalizedRuntimeState.uploads.grok2api.targetUrl,
     };
   }
 
@@ -203,6 +241,10 @@
       register: {},
       sso: {},
       upload: {},
+      uploads: {
+        webchat2api: {},
+        grok2api: {},
+      },
     };
     assignPositiveInteger(flatRuntime.session, 'registerTabId', state.grokRegisterTabId);
     assignCleanString(flatRuntime.session, 'pageState', state.grokPageState);
@@ -222,6 +264,14 @@
     assignPositiveInteger(flatRuntime.upload, 'uploadedAt', state.grokWebchat2ApiUploadedAt);
     assignCleanString(flatRuntime.upload, 'message', state.grokWebchat2ApiUploadMessage);
     assignCleanString(flatRuntime.upload, 'targetUrl', state.grokWebchat2ApiTargetUrl);
+    assignCleanString(flatRuntime.uploads.webchat2api, 'status', state.grokWebchat2ApiUploadStatus);
+    assignPositiveInteger(flatRuntime.uploads.webchat2api, 'uploadedAt', state.grokWebchat2ApiUploadedAt);
+    assignCleanString(flatRuntime.uploads.webchat2api, 'message', state.grokWebchat2ApiUploadMessage);
+    assignCleanString(flatRuntime.uploads.webchat2api, 'targetUrl', state.grokWebchat2ApiTargetUrl);
+    assignCleanString(flatRuntime.uploads.grok2api, 'status', state.grok2ApiUploadStatus);
+    assignPositiveInteger(flatRuntime.uploads.grok2api, 'uploadedAt', state.grok2ApiUploadedAt);
+    assignCleanString(flatRuntime.uploads.grok2api, 'message', state.grok2ApiUploadMessage);
+    assignCleanString(flatRuntime.uploads.grok2api, 'targetUrl', state.grok2ApiTargetUrl);
     return normalizeRuntimeState(deepMerge(deepMerge(runtimeFlowState.grok || {}, legacyFlowState), flatRuntime));
   }
 
@@ -395,6 +445,30 @@
     }
     if (Object.prototype.hasOwnProperty.call(payload, 'grokWebchat2ApiTargetUrl')) {
       patch.upload = { ...(patch.upload || {}), targetUrl: payload.grokWebchat2ApiTargetUrl };
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'grok2ApiUploadStatus')) {
+      patch.uploads = {
+        ...(patch.uploads || {}),
+        grok2api: { ...((patch.uploads || {}).grok2api || {}), status: payload.grok2ApiUploadStatus },
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'grok2ApiUploadedAt')) {
+      patch.uploads = {
+        ...(patch.uploads || {}),
+        grok2api: { ...((patch.uploads || {}).grok2api || {}), uploadedAt: payload.grok2ApiUploadedAt },
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'grok2ApiUploadMessage')) {
+      patch.uploads = {
+        ...(patch.uploads || {}),
+        grok2api: { ...((patch.uploads || {}).grok2api || {}), message: payload.grok2ApiUploadMessage },
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'grok2ApiTargetUrl')) {
+      patch.uploads = {
+        ...(patch.uploads || {}),
+        grok2api: { ...((patch.uploads || {}).grok2api || {}), targetUrl: payload.grok2ApiTargetUrl },
+      };
     }
     if (!Object.keys(patch).length) {
       return {};

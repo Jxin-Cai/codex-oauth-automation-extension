@@ -338,6 +338,31 @@
         <span class="data-label">上传状态</span>
         <span id="display-grok-webchat2api-upload-status" class="data-value mono">未开始</span>
       </div>
+      <div class="data-row" id="row-grok-grok2api-url" style="display:none;">
+        <span class="data-label">Grok2API</span>
+        <input type="text" id="input-grok-grok2api-url" class="data-input"
+          placeholder="请输入 Grok2API 地址，例如 http://localhost:9000" />
+      </div>
+      <div class="data-row" id="row-grok-grok2api-username" style="display:none;">
+        <span class="data-label">管理员</span>
+        <input type="text" id="input-grok-grok2api-username" class="data-input"
+          placeholder="Grok2API 管理员用户名" />
+      </div>
+      <div class="data-row" id="row-grok-grok2api-password" style="display:none;">
+        <span class="data-label">密码</span>
+        <div class="input-with-icon">
+          <input type="password" id="input-grok-grok2api-password" class="data-input data-input-with-icon"
+            placeholder="Grok2API 管理员密码" />
+          <button id="btn-toggle-grok-grok2api-password" class="input-icon-btn" type="button"
+            data-password-toggle="input-grok-grok2api-password" data-show-label="显示 Grok2API 密码"
+            data-hide-label="隐藏 Grok2API 密码" aria-label="显示 Grok2API 密码"
+            title="显示 Grok2API 密码"></button>
+        </div>
+      </div>
+      <div class="data-row" id="row-grok-grok2api-upload-status" style="display:none;">
+        <span class="data-label">导入状态</span>
+        <span id="display-grok-grok2api-upload-status" class="data-value mono">未开始</span>
+      </div>
       <div class="data-row" id="row-grok-sso-settings" style="display:none;">
         <span class="data-label">SSO Cookie</span>
         <div class="data-inline">

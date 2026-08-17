@@ -172,6 +172,23 @@ test('grok fresh keep-state reset clears registration, SSO, and upload runtime',
   assert.equal(patch.runtimeState.flowState.grok.upload.status, '');
 });
 
+test('grok upload state isolates grok2api from legacy webchat upload', () => {
+  const api = loadGrokStateApi();
+  const view = api.buildStateView({
+    grokWebchat2ApiUploadStatus: 'uploaded',
+    grokWebchat2ApiUploadMessage: 'webchat ok',
+    grok2ApiUploadStatus: 'error',
+    grok2ApiUploadMessage: 'import failed',
+  });
+
+  assert.equal(view.flowState.grok.upload.status, 'uploaded');
+  assert.equal(view.flowState.grok.uploads.webchat2api.status, 'uploaded');
+  assert.equal(view.flowState.grok.uploads.grok2api.status, 'error');
+  assert.equal(view.grokWebchat2ApiUploadStatus, 'uploaded');
+  assert.equal(view.grok2ApiUploadStatus, 'error');
+  assert.equal(view.grok2ApiUploadMessage, 'import failed');
+});
+
 test('grok downstream reset clears only the state owned by the restarted tail', () => {
   const api = loadGrokStateApi();
   const currentState = {

@@ -340,17 +340,27 @@
     }
 
     async function resolveSignupEmailForFlow(state, options = {}) {
-      let resolvedEmail = state.email;
+      const forceFresh = Boolean(options?.forceFresh);
+      const excludedEmails = new Set(
+        (Array.isArray(options?.excludeEmails) ? options.excludeEmails : [])
+          .map((entry) => String(entry || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      let resolvedEmail = forceFresh ? '' : state.email;
+      if (resolvedEmail && excludedEmails.has(String(resolvedEmail).trim().toLowerCase())) {
+        resolvedEmail = '';
+      }
       let generatedEmailAlreadyPersisted = false;
       if (isHotmailProvider(state)) {
         const account = await ensureHotmailAccountForFlow({
           allowAllocate: true,
           markUsed: true,
-          preferredAccountId: state.currentHotmailAccountId || null,
+          preferredAccountId: forceFresh ? null : (state.currentHotmailAccountId || null),
+          excludeIds: forceFresh && state.currentHotmailAccountId ? [state.currentHotmailAccountId] : [],
         });
         resolvedEmail = account.email;
       } else if (isLuckmailProvider(state)) {
-        const purchase = await ensureLuckmailPurchaseForFlow({ allowReuse: true });
+        const purchase = await ensureLuckmailPurchaseForFlow({ allowReuse: !forceFresh });
         resolvedEmail = purchase.email_address;
       } else if (isGeneratedAliasProvider(state)) {
         if (Boolean(state?.mail2925UseAccountPool)
@@ -358,15 +368,18 @@
           && typeof ensureMail2925AccountForFlow === 'function') {
           await ensureMail2925AccountForFlow({
             allowAllocate: true,
-            preferredAccountId: state.currentMail2925AccountId || null,
+            preferredAccountId: forceFresh ? null : (state.currentMail2925AccountId || null),
             markUsed: true,
           });
         }
-        if (!isReusableGeneratedAliasEmail?.(state, resolvedEmail)) {
+        if (forceFresh || !isReusableGeneratedAliasEmail?.(state, resolvedEmail)) {
           resolvedEmail = buildGeneratedAliasEmail(state);
         }
-      } else if (!resolvedEmail && typeof fetchGeneratedEmail === 'function') {
-        resolvedEmail = await fetchGeneratedEmail(state, options);
+      } else if ((forceFresh || !resolvedEmail) && typeof fetchGeneratedEmail === 'function') {
+        resolvedEmail = await fetchGeneratedEmail(state, {
+          ...options,
+          generateNew: forceFresh || Boolean(options?.generateNew),
+        });
         generatedEmailAlreadyPersisted = true;
       }
 

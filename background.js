@@ -50,6 +50,7 @@ importScripts(
   'flows/kiro/background/desktop-authorize-runner.js',
   'flows/kiro/background/publisher-kiro-rs.js',
   'flows/grok/background/publisher-webchat2api.js',
+  'flows/grok/background/publisher-grok2api.js',
   'flows/openai/background/session-reader.js',
   'flows/openai/background/publisher-webchat.js',
   'background/email-local-part-helpers.js',
@@ -1275,6 +1276,9 @@ const PERSISTED_SETTING_DEFAULTS = {
   kiroRsKey: '',
   grokWebchat2ApiUrl: '',
   grokWebchat2ApiAdminKey: '',
+  grok2ApiUrl: '',
+  grok2ApiUsername: '',
+  grok2ApiPassword: '',
   openaiWebchatUrl: '',
   openaiWebchatAdminKey: '',
   openaiWebchatUploadEnabled: false,
@@ -1490,6 +1494,9 @@ const SETTINGS_SCHEMA_VIEW_KEYS = Object.freeze([
   'kiroRsKey',
   'grokWebchat2ApiUrl',
   'grokWebchat2ApiAdminKey',
+  'grok2ApiUrl',
+  'grok2ApiUsername',
+  'grok2ApiPassword',
   'openaiWebchatUrl',
   'openaiWebchatAdminKey',
   'openaiWebchatUploadEnabled',
@@ -3246,10 +3253,13 @@ function normalizePersistentSettingValue(key, value) {
       return String(value || '').trim().toLowerCase() === 'kiro' ? 'kiro' : DEFAULT_ACTIVE_FLOW_ID;
     case 'kiroRsUrl':
     case 'grokWebchat2ApiUrl':
+    case 'grok2ApiUrl':
     case 'openaiWebchatUrl':
       return String(value || '').trim();
     case 'kiroRsKey':
     case 'grokWebchat2ApiAdminKey':
+    case 'grok2ApiUsername':
+    case 'grok2ApiPassword':
     case 'openaiWebchatAdminKey':
       return String(value || '').trim();
     case 'openaiWebchatUploadEnabled':
@@ -3926,6 +3936,9 @@ function buildSettingsStatePatchFromFlatUpdates(updates = {}) {
     setSettingsStatePatchValue(patch, ['flows', 'openai', 'targets', 'webchat', 'apiKey'], sharedWebchatAdminKey);
     setSettingsStatePatchValue(patch, ['flows', 'grok', 'targets', 'webchat2api', 'apiKey'], sharedWebchatAdminKey);
   }
+  assignIfUpdated('grok2ApiUrl', ['flows', 'grok', 'targets', 'grok2api', 'baseUrl']);
+  assignIfUpdated('grok2ApiUsername', ['flows', 'grok', 'targets', 'grok2api', 'username']);
+  assignIfUpdated('grok2ApiPassword', ['flows', 'grok', 'targets', 'grok2api', 'password']);
   assignIfUpdated('openaiWebchatUploadEnabled', ['flows', 'openai', 'webchatUpload', 'enabled']);
 
   if (hasUpdate('stepExecutionRangeByFlow') && isPlainObjectValue(updates.stepExecutionRangeByFlow)) {
@@ -11131,6 +11144,7 @@ const AUTO_RUN_BACKGROUND_COMPLETED_STEP_KEYS = new Set([
   'grok-submit-profile',
   'grok-extract-sso-cookie',
   'grok-upload-sso-to-webchat2api',
+  'grok-upload-sso-to-grok2api',
 ]);
 const STEP_COMPLETION_SIGNAL_STEP_KEYS = new Set([
   'fill-password',
@@ -14343,6 +14357,13 @@ const grokWebchat2ApiPublisher = self.MultiPageBackgroundGrokPublisherWebchat2Ap
   getState,
   setState,
 });
+const grok2ApiPublisher = self.MultiPageBackgroundGrokPublisherGrok2Api?.createGrok2ApiPublisher({
+  addLog,
+  completeNodeFromBackground,
+  fetchImpl: typeof fetch === 'function' ? fetch.bind(globalThis) : null,
+  getState,
+  setState,
+});
 const openAiWebchatPublisher = self.MultiPageBackgroundOpenAiPublisherWebchat?.createOpenAiWebchatPublisher({
   addLog,
   broadcastDataUpdate,
@@ -14457,6 +14478,7 @@ const stepExecutorsByKey = {
   'grok-submit-profile': (state) => grokRegisterRunner.executeGrokSubmitProfile(state),
   'grok-extract-sso-cookie': (state) => grokRegisterRunner.executeGrokExtractSsoCookie(state),
   'grok-upload-sso-to-webchat2api': (state) => grokWebchat2ApiPublisher.executeGrokUploadSsoToWebchat2Api(state),
+  'grok-upload-sso-to-grok2api': (state) => grok2ApiPublisher.executeGrokUploadSsoToGrok2Api(state),
 };
 const messageRouter = self.MultiPageBackgroundMessageRouter?.createMessageRouter({
   addLog,

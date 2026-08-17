@@ -75,13 +75,31 @@
         flowId: 'grok',
       },
     ],
+    grok2api: [
+      {
+        id: 6,
+        order: 60,
+        key: 'grok-upload-sso-to-grok2api',
+        title: '导入账号到 Grok2API',
+        sourceId: 'grok-grok2api',
+        driverId: 'flows/grok/background/publisher-grok2api',
+        command: 'grok-upload-sso-to-grok2api',
+        flowId: 'grok',
+      },
+    ],
   });
+
+  const COMMON_STEPS = STEP_VARIANTS.default.slice(0, 5);
 
   function getVariantStepDefinitions(variantKey = 'default') {
     return Array.isArray(STEP_VARIANTS[variantKey]) ? STEP_VARIANTS[variantKey] : STEP_VARIANTS.default;
   }
 
-  function getModeStepDefinitions() {
+  function getModeStepDefinitions(options = {}) {
+    const targetId = String(options?.targetId || '').trim().toLowerCase();
+    if (targetId === 'grok2api') {
+      return [...COMMON_STEPS, ...STEP_VARIANTS.grok2api];
+    }
     return getVariantStepDefinitions('default');
   }
 
